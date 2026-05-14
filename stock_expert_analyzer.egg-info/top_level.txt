@@ -1,0 +1,7 @@
+client
+drizzle
+node_modules
+patches
+reference
+server
+shared
