@@ -7,6 +7,7 @@ import { createAnalysisReport, listAnalysisReports } from "./db";
 import { storagePut } from "./storage";
 import { decodePdfDataUrl, sanitizeStorageSegment } from "./analysisUtils";
 import { verifyFirebaseIdToken } from "./firebaseAuth";
+import { getMarketSnapshot } from "./marketData";
 
 export const appRouter = router({
     // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
@@ -20,6 +21,10 @@ export const appRouter = router({
         success: true,
       } as const;
     }),
+  }),
+
+  market: router({
+    snapshot: publicProcedure.query(() => getMarketSnapshot()),
   }),
 
   analysis: router({
