@@ -1,13 +1,10 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "pnpm run build",
   "outputDirectory": "dist/public",
   "rewrites": [
     {
-      "source": "/api/trpc/(.*)",
-      "destination": "/api/trpc/$1"
-    },
-    {
-      "source": "/(.*)",
+      "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
   ]
