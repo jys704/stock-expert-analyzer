@@ -83,7 +83,7 @@ type ScoreModelItem = {
 
 type MarketSnapshot = {
   asOf: string;
-  source: "sample" | "yahoo";
+  source: "sample" | "yahoo" | "naver";
   sourceDetail: string;
   providers: ProviderStatus[];
   marketSummary: string;
@@ -394,6 +394,7 @@ export default function Home() {
             <Badge variant="outline" className="h-8 rounded-md border-slate-200 bg-white text-slate-600">데이터 기준 {dataTime}</Badge>
             {snapshot?.source === "sample" ? <Badge variant="outline" className="h-8 rounded-md border-amber-200 bg-amber-50 text-amber-700">샘플 공급자</Badge> : null}
             {snapshot?.source === "yahoo" ? <Badge variant="outline" className="h-8 rounded-md border-emerald-200 bg-emerald-50 text-emerald-700">야후 시세</Badge> : null}
+            {snapshot?.source === "naver" ? <Badge variant="outline" className="h-8 rounded-md border-emerald-200 bg-emerald-50 text-emerald-700">네이버 시세</Badge> : null}
             <Badge className="h-8 rounded-md bg-slate-950 text-white hover:bg-slate-950">투자 참고용</Badge>
           </div>
         </div>

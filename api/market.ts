@@ -51,7 +51,7 @@ type StockSignal = {
 
 type MarketSnapshot = {
   asOf: string;
-  source: "sample" | "yahoo";
+  source: "sample" | "yahoo" | "naver";
   sourceDetail: string;
   providers: ProviderStatus[];
   marketSummary: string;
@@ -102,10 +102,33 @@ type YahooChartResponse = {
 };
 
 type YahooMarketData = {
+  source: "yahoo" | "naver";
   status: ProviderStatus;
   asOf: string;
   indices: Array<Pick<MarketIndex, "name" | "value" | "changePct">>;
   stocks: StockSignal[];
+};
+
+type NaverRealtimeResponse = {
+  resultCode?: string;
+  result?: {
+    time?: number;
+    areas?: Array<{
+      name?: string;
+      datas?: NaverRealtimeData[];
+    }>;
+  };
+};
+
+type NaverRealtimeData = {
+  cd?: string;
+  nm?: string;
+  nv?: number;
+  pcv?: number;
+  cr?: number;
+  rf?: string;
+  aq?: number;
+  aa?: number;
 };
 
 const YAHOO_STOCK_SYMBOLS: Record<string, string> = {
@@ -134,7 +157,7 @@ function provider(
 async function buildSnapshot(): Promise<MarketSnapshot> {
   const base = getBaseSnapshot();
   const [marketResult, disclosureResult, newsResult] = await Promise.allSettled([
-    fetchYahooMarket(base.stocks),
+    fetchNaverMarket(base.stocks).catch(() => fetchYahooMarket(base.stocks)),
     fetchDartDisclosures(base.stocks),
     fetchNaverNews(base.stocks),
   ]);
@@ -147,7 +170,7 @@ async function buildSnapshot(): Promise<MarketSnapshot> {
   } else {
     snapshot = upsertProvider(
       snapshot,
-      provider("price", "시세", "fallback", "Yahoo 시세 조회에 실패해 내장 샘플 지수와 종목 데이터를 표시합니다."),
+      provider("price", "시세", "fallback", "네이버/Yahoo 시세 조회에 실패해 내장 샘플 지수와 종목 데이터를 표시합니다."),
     );
   }
 
@@ -255,6 +278,7 @@ async function fetchYahooMarket(baseStocks: StockSignal[]): Promise<YahooMarketD
   );
 
   return {
+    source: "yahoo",
     status: provider("price", "시세", "connected", "Yahoo Finance chart 지연 시세로 지수, 종목 등락률, 거래량, 거래대금을 갱신했습니다."),
     asOf: asOfTime > 0 ? new Date(asOfTime * 1000).toISOString() : new Date().toISOString(),
     indices: [
@@ -263,6 +287,112 @@ async function fetchYahooMarket(baseStocks: StockSignal[]): Promise<YahooMarketD
     ],
     stocks: liveStocks.map(({ regularMarketTime, ...stock }) => stock),
   };
+}
+
+async function fetchNaverMarket(baseStocks: StockSignal[]): Promise<YahooMarketData> {
+  const [kospi, kosdaq, liveStocks] = await Promise.all([
+    fetchNaverIndex("KOSPI"),
+    fetchNaverIndex("KOSDAQ"),
+    Promise.all(baseStocks.map(fetchNaverStock)),
+  ]);
+  const asOfTime = Math.max(
+    kospi.asOfTime,
+    kosdaq.asOfTime,
+    ...liveStocks.map((stock) => stock.regularMarketTime ?? 0),
+  );
+
+  return {
+    source: "naver",
+    status: provider("price", "시세", "connected", "네이버 금융 realtime 시세로 지수, 종목 등락률, 거래량, 거래대금을 갱신했습니다."),
+    asOf: asOfTime > 0 ? new Date(asOfTime).toISOString() : new Date().toISOString(),
+    indices: [
+      { name: "KOSPI" as const, value: kospi.value, changePct: kospi.changePct },
+      { name: "KOSDAQ" as const, value: kosdaq.value, changePct: kosdaq.changePct },
+    ],
+    stocks: liveStocks.map(({ regularMarketTime, ...stock }) => stock),
+  };
+}
+
+async function fetchNaverIndex(name: Market) {
+  const data = await fetchNaverRealtime(`SERVICE_INDEX:${name}`);
+  const item = data.result?.areas?.find((area) => area.name === "SERVICE_INDEX")?.datas?.[0];
+  const value = item?.nv;
+  const changePct = signedNaverRate(item);
+
+  if (typeof value !== "number" || typeof changePct !== "number") {
+    throw new Error(`${name} Naver index data is incomplete`);
+  }
+
+  return {
+    value: value / 100,
+    changePct,
+    asOfTime: data.result?.time ?? 0,
+  };
+}
+
+async function fetchNaverStock(stock: StockSignal) {
+  try {
+    const data = await fetchNaverRealtime(`SERVICE_ITEM:${stock.code}`);
+    const item = data.result?.areas?.find((area) => area.name === "SERVICE_ITEM")?.datas?.[0];
+    const value = item?.nv;
+    const changePct = signedNaverRate(item);
+
+    if (typeof value !== "number" || typeof changePct !== "number") {
+      throw new Error(`${stock.code} Naver stock data is incomplete`);
+    }
+
+    const currentVolume = item?.aq ?? 0;
+    const averageVolume = await fetchYahooAverageVolume(stock).catch(() => 0);
+    const sessionProgress = getKoreanSessionProgress(data.result?.time ? Math.floor(data.result.time / 1000) : undefined);
+    const expectedVolumeSoFar = averageVolume * sessionProgress;
+    const volumeRatio = expectedVolumeSoFar > 0 ? currentVolume / expectedVolumeSoFar : stock.volumeRatio;
+    const turnoverBn = typeof item?.aa === "number" ? item.aa / 100_000_000 : stock.turnoverBn;
+    const trendScore = Math.max(1, Math.min(20, Math.round(8 + changePct * 1.8 + Math.min(volumeRatio, 3) * 3)));
+
+    return {
+      ...stock,
+      changePct,
+      volumeRatio,
+      turnoverBn,
+      trendScore,
+      riskTags: getLiveRiskTags(stock, changePct, volumeRatio),
+      earlySignal: stock.earlySignal || changePct > 0 || volumeRatio >= 1.2,
+      regularMarketTime: data.result?.time ?? 0,
+    };
+  } catch {
+    return { ...stock, regularMarketTime: 0 };
+  }
+}
+
+async function fetchNaverRealtime(query: string) {
+  const url = new URL("https://polling.finance.naver.com/api/realtime");
+  url.searchParams.set("query", query);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4_000);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+
+    if (!response.ok) {
+      throw new Error(`Naver realtime responded with ${response.status}`);
+    }
+
+    const body = await response.json() as NaverRealtimeResponse;
+
+    if (body.resultCode !== "success") {
+      throw new Error("Naver realtime API error");
+    }
+
+    return body;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function signedNaverRate(item?: NaverRealtimeData) {
+  if (typeof item?.cr !== "number") return undefined;
+  const sign = item.rf === "4" || item.rf === "5" ? -1 : 1;
+  return item.rf === "3" ? 0 : item.cr * sign;
 }
 
 async function fetchYahooIndex(name: Market, symbol: string) {
@@ -288,6 +418,22 @@ async function fetchYahooIndex(name: Market, symbol: string) {
 
 async function fetchYahooStocks(baseStocks: StockSignal[]) {
   return Promise.all(baseStocks.map(fetchYahooStock));
+}
+
+async function fetchYahooAverageVolume(stock: StockSignal) {
+  const symbol = YAHOO_STOCK_SYMBOLS[stock.code];
+  if (!symbol) return 0;
+
+  const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
+  url.searchParams.set("range", "5d");
+  url.searchParams.set("interval", "1d");
+
+  const body = await fetchJson<YahooChartResponse>(url, 4_000);
+  const quote = body.chart?.result?.[0]?.indicators?.quote?.[0];
+  const volumes = compactNumbers(quote?.volume ?? []);
+  const previousVolumes = volumes.length > 1 ? volumes.slice(0, -1) : volumes;
+
+  return average(previousVolumes);
 }
 
 async function fetchYahooStock(stock: StockSignal) {
@@ -356,7 +502,7 @@ function applyYahooMarket(snapshot: MarketSnapshot, marketData: YahooMarketData)
   return {
     ...snapshot,
     asOf: marketData.asOf,
-    source: "yahoo",
+    source: marketData.source,
     marketSummary,
     briefing: `${marketSummary} 종목 등락률, 거래량, 거래대금은 Yahoo Finance 지연 시세를 반영했고 수급·뉴스·공시는 보강 데이터로 함께 계산했습니다.`,
     indices,
