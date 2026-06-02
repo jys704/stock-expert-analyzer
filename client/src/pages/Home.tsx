@@ -25,7 +25,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
-import { trpc } from "@/lib/trpc";
+import { useQuery } from "@tanstack/react-query";
 
 type Market = "KOSPI" | "KOSDAQ";
 
@@ -65,6 +65,34 @@ type StockSignal = {
   sectorRank: number;
   riskTags: string[];
   earlySignal: boolean;
+};
+
+type ProviderStatus = {
+  id: "price" | "disclosure" | "news";
+  label: string;
+  state: "connected" | "missing_key" | "fallback" | "error";
+  detail: string;
+  requiredEnv?: string[];
+};
+
+type ScoreModelItem = {
+  label: string;
+  max: number;
+  rule: string;
+};
+
+type MarketSnapshot = {
+  asOf: string;
+  source: "sample" | "yahoo";
+  sourceDetail: string;
+  providers: ProviderStatus[];
+  marketSummary: string;
+  briefing: string;
+  indices: MarketIndex[];
+  themes: StrengthItem[];
+  sectors: StrengthItem[];
+  stocks: StockSignal[];
+  scoreModel: ScoreModelItem[];
 };
 
 type ScoreBreakdown = {
@@ -113,6 +141,18 @@ function scoreTone(score: number) {
 
 function unique(values: string[]) {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b, "ko"));
+}
+
+async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
+  const response = await fetch("/api/market", {
+    headers: { accept: "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Market API responded with ${response.status}`);
+  }
+
+  return response.json() as Promise<MarketSnapshot>;
 }
 
 function RankList({ title, items }: { title: string; items: StrengthItem[] }) {
@@ -279,7 +319,9 @@ function RecommendationCard({ stock, rank }: { stock: StockSignal; rank: number 
 }
 
 export default function Home() {
-  const snapshotQuery = trpc.market.snapshot.useQuery(undefined, {
+  const snapshotQuery = useQuery({
+    queryKey: ["market-snapshot"],
+    queryFn: fetchMarketSnapshot,
     refetchInterval: 60_000,
   });
   const [market, setMarket] = useState<"전체" | Market>("전체");
