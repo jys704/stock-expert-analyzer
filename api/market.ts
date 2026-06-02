@@ -88,10 +88,35 @@ type YahooChartResponse = {
         previousClose?: number;
         chartPreviousClose?: number;
         regularMarketTime?: number;
+        regularMarketVolume?: number;
+      };
+      indicators?: {
+        quote?: Array<{
+          close?: Array<number | null>;
+          volume?: Array<number | null>;
+        }>;
       };
     }>;
     error?: unknown;
   };
+};
+
+type YahooMarketData = {
+  status: ProviderStatus;
+  asOf: string;
+  indices: Array<Pick<MarketIndex, "name" | "value" | "changePct">>;
+  stocks: StockSignal[];
+};
+
+const YAHOO_STOCK_SYMBOLS: Record<string, string> = {
+  "000660": "000660.KS",
+  "058470": "058470.KQ",
+  "267260": "267260.KS",
+  "066970": "066970.KS",
+  "196170": "196170.KQ",
+  "047810": "047810.KS",
+  "035420": "035420.KS",
+  "034020": "034020.KS",
 };
 
 let cachedSnapshot: CachedSnapshot | undefined;
@@ -108,21 +133,21 @@ function provider(
 
 async function buildSnapshot(): Promise<MarketSnapshot> {
   const base = getBaseSnapshot();
-  const [indexResult, disclosureResult, newsResult] = await Promise.allSettled([
-    fetchYahooIndices(),
+  const [marketResult, disclosureResult, newsResult] = await Promise.allSettled([
+    fetchYahooMarket(base.stocks),
     fetchDartDisclosures(base.stocks),
     fetchNaverNews(base.stocks),
   ]);
 
   let snapshot = base;
 
-  if (indexResult.status === "fulfilled") {
-    snapshot = applyYahooIndices(snapshot, indexResult.value.indices, indexResult.value.asOf);
-    snapshot = upsertProvider(snapshot, indexResult.value.status);
+  if (marketResult.status === "fulfilled") {
+    snapshot = applyYahooMarket(snapshot, marketResult.value);
+    snapshot = upsertProvider(snapshot, marketResult.value.status);
   } else {
     snapshot = upsertProvider(
       snapshot,
-      provider("price", "시세", "fallback", "Yahoo 지수 조회에 실패해 내장 샘플 지수를 표시합니다."),
+      provider("price", "시세", "fallback", "Yahoo 시세 조회에 실패해 내장 샘플 지수와 종목 데이터를 표시합니다."),
     );
   }
 
@@ -178,7 +203,7 @@ function getBaseSnapshot(): MarketSnapshot {
     { code: "000660", name: "SK하이닉스", market: "KOSPI", sector: "반도체", theme: "AI 반도체", changePct: 5.42, volumeRatio: 2.4, turnoverBn: 12850, foreignNetBn: 1820, institutionNetBn: 690, programNetBn: 410, news: "HBM 공급 확대 기대", disclosure: "최근 공시 확인 전", trendScore: 18, themeRank: 1, sectorRank: 1, riskTags: ["단기 급등"], earlySignal: false },
     { code: "058470", name: "리노공업", market: "KOSDAQ", sector: "반도체", theme: "AI 반도체", changePct: 4.18, volumeRatio: 2.1, turnoverBn: 1420, foreignNetBn: 210, institutionNetBn: 130, programNetBn: 48, news: "AI 테스트 소켓 수요", disclosure: "최근 공시 확인 전", trendScore: 17, themeRank: 1, sectorRank: 1, riskTags: [], earlySignal: false },
     { code: "267260", name: "HD현대일렉트릭", market: "KOSPI", sector: "전기장비", theme: "전력기기", changePct: 3.72, volumeRatio: 1.9, turnoverBn: 3380, foreignNetBn: 95, institutionNetBn: 340, programNetBn: 62, news: "북미 전력망 투자 기대", disclosure: "최근 공시 확인 전", trendScore: 18, themeRank: 2, sectorRank: 2, riskTags: [], earlySignal: false },
-    { code: "066970", name: "엘앤에프", market: "KOSDAQ", sector: "2차전지", theme: "2차전지 장비", changePct: 2.12, volumeRatio: 1.7, turnoverBn: 980, foreignNetBn: 74, institutionNetBn: 54, programNetBn: 18, news: "배터리 소재 업황 저점 기대", disclosure: "최근 공시 확인 전", trendScore: 12, themeRank: 3, sectorRank: 4, riskTags: ["업황 변동성"], earlySignal: true },
+    { code: "066970", name: "엘앤에프", market: "KOSPI", sector: "2차전지", theme: "2차전지 장비", changePct: 2.12, volumeRatio: 1.7, turnoverBn: 980, foreignNetBn: 74, institutionNetBn: 54, programNetBn: 18, news: "배터리 소재 업황 저점 기대", disclosure: "최근 공시 확인 전", trendScore: 12, themeRank: 3, sectorRank: 4, riskTags: ["업황 변동성"], earlySignal: true },
     { code: "196170", name: "알테오젠", market: "KOSDAQ", sector: "제약·바이오", theme: "바이오 임상", changePct: 3.05, volumeRatio: 1.8, turnoverBn: 2210, foreignNetBn: 160, institutionNetBn: -42, programNetBn: 30, news: "기술이전 기대감", disclosure: "최근 공시 확인 전", trendScore: 15, themeRank: 4, sectorRank: 3, riskTags: ["이벤트 변동성"], earlySignal: true },
     { code: "047810", name: "한국항공우주", market: "KOSPI", sector: "방산", theme: "방산", changePct: 1.62, volumeRatio: 1.5, turnoverBn: 760, foreignNetBn: -18, institutionNetBn: 88, programNetBn: 12, news: "수출 협상 보도", disclosure: "최근 공시 확인 전", trendScore: 11, themeRank: 5, sectorRank: 5, riskTags: [], earlySignal: true },
     { code: "035420", name: "NAVER", market: "KOSPI", sector: "소프트웨어", theme: "AI 서비스", changePct: 0.86, volumeRatio: 1.35, turnoverBn: 1140, foreignNetBn: 122, institutionNetBn: 45, programNetBn: 39, news: "AI 검색 서비스 개편", disclosure: "최근 공시 확인 전", trendScore: 9, themeRank: 6, sectorRank: 5, riskTags: ["추세 확인 필요"], earlySignal: true },
@@ -216,21 +241,27 @@ function getBaseSnapshot(): MarketSnapshot {
   };
 }
 
-async function fetchYahooIndices() {
-  const [kospi, kosdaq] = await Promise.all([
+async function fetchYahooMarket(baseStocks: StockSignal[]): Promise<YahooMarketData> {
+  const [kospi, kosdaq, liveStocks] = await Promise.all([
     fetchYahooIndex("KOSPI", "^KS11"),
     fetchYahooIndex("KOSDAQ", "^KQ11"),
+    fetchYahooStocks(baseStocks),
   ]);
 
-  const asOfTime = Math.max(kospi.regularMarketTime ?? 0, kosdaq.regularMarketTime ?? 0);
+  const asOfTime = Math.max(
+    kospi.regularMarketTime ?? 0,
+    kosdaq.regularMarketTime ?? 0,
+    ...liveStocks.map((stock) => stock.regularMarketTime ?? 0),
+  );
 
   return {
-    status: provider("price", "시세", "connected", "Yahoo Finance chart 지연 시세로 KOSPI/KOSDAQ 지수와 등락률을 갱신했습니다."),
+    status: provider("price", "시세", "connected", "Yahoo Finance chart 지연 시세로 지수, 종목 등락률, 거래량, 거래대금을 갱신했습니다."),
     asOf: asOfTime > 0 ? new Date(asOfTime * 1000).toISOString() : new Date().toISOString(),
     indices: [
       { name: "KOSPI" as const, value: kospi.value, changePct: kospi.changePct },
       { name: "KOSDAQ" as const, value: kosdaq.value, changePct: kosdaq.changePct },
     ],
+    stocks: liveStocks.map(({ regularMarketTime, ...stock }) => stock),
   };
 }
 
@@ -255,9 +286,60 @@ async function fetchYahooIndex(name: Market, symbol: string) {
   };
 }
 
-function applyYahooIndices(snapshot: MarketSnapshot, liveIndices: Array<Pick<MarketIndex, "name" | "value" | "changePct">>, asOf: string): MarketSnapshot {
+async function fetchYahooStocks(baseStocks: StockSignal[]) {
+  return Promise.all(baseStocks.map(fetchYahooStock));
+}
+
+async function fetchYahooStock(stock: StockSignal) {
+  try {
+    const symbol = YAHOO_STOCK_SYMBOLS[stock.code];
+    if (!symbol) return { ...stock, regularMarketTime: 0 };
+
+    const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
+    url.searchParams.set("range", "5d");
+    url.searchParams.set("interval", "1d");
+
+    const body = await fetchJson<YahooChartResponse>(url, 4_000);
+    const result = body.chart?.result?.[0];
+    const meta = result?.meta;
+    const quote = result?.indicators?.quote?.[0];
+    const closes = compactNumbers(quote?.close ?? []);
+    const volumes = compactNumbers(quote?.volume ?? []);
+    const value = meta?.regularMarketPrice ?? closes.at(-1);
+    const previousClose = meta?.previousClose ?? meta?.chartPreviousClose ?? closes.at(-2);
+
+    if (typeof value !== "number" || typeof previousClose !== "number" || previousClose === 0) {
+      return { ...stock, regularMarketTime: meta?.regularMarketTime ?? 0 };
+    }
+
+    const currentVolume = meta?.regularMarketVolume ?? volumes.at(-1) ?? 0;
+    const previousVolumes = volumes.length > 1 ? volumes.slice(0, -1) : volumes;
+    const averageVolume = average(previousVolumes);
+    const sessionProgress = getKoreanSessionProgress(meta?.regularMarketTime);
+    const expectedVolumeSoFar = averageVolume * sessionProgress;
+    const volumeRatio = expectedVolumeSoFar > 0 ? currentVolume / expectedVolumeSoFar : stock.volumeRatio;
+    const changePct = ((value - previousClose) / previousClose) * 100;
+    const turnoverBn = currentVolume > 0 ? (value * currentVolume) / 100_000_000 : stock.turnoverBn;
+    const trendScore = Math.max(1, Math.min(20, Math.round(8 + changePct * 1.8 + Math.min(volumeRatio, 3) * 3)));
+
+    return {
+      ...stock,
+      changePct,
+      volumeRatio,
+      turnoverBn,
+      trendScore,
+      riskTags: getLiveRiskTags(stock, changePct, volumeRatio),
+      earlySignal: stock.earlySignal || changePct > 0 || volumeRatio >= 1.2,
+      regularMarketTime: meta?.regularMarketTime ?? 0,
+    };
+  } catch {
+    return { ...stock, regularMarketTime: 0 };
+  }
+}
+
+function applyYahooMarket(snapshot: MarketSnapshot, marketData: YahooMarketData): MarketSnapshot {
   const indices = snapshot.indices.map((index) => {
-    const live = liveIndices.find((item) => item.name === index.name);
+    const live = marketData.indices.find((item) => item.name === index.name);
     if (!live) return index;
 
     return {
@@ -266,21 +348,28 @@ function applyYahooIndices(snapshot: MarketSnapshot, liveIndices: Array<Pick<Mar
       changePct: live.changePct,
     };
   });
-  const marketSummary = buildIndexSummary(indices);
+  const themes = deriveStrengthItems(marketData.stocks, "theme");
+  const sectors = deriveStrengthItems(marketData.stocks, "sector");
+  const stocks = applyStrengthRanks(marketData.stocks, themes, sectors);
+  const marketSummary = buildMarketSummary(indices, themes);
 
   return {
     ...snapshot,
-    asOf,
+    asOf: marketData.asOf,
     source: "yahoo",
     marketSummary,
-    briefing: `${marketSummary} 테마·종목 점수는 샘플 수급 데이터에 DART 공시와 네이버 뉴스를 보강한 참고용 결과입니다.`,
+    briefing: `${marketSummary} 종목 등락률, 거래량, 거래대금은 Yahoo Finance 지연 시세를 반영했고 수급·뉴스·공시는 보강 데이터로 함께 계산했습니다.`,
     indices,
+    themes,
+    sectors,
+    stocks,
   };
 }
 
-function buildIndexSummary(indices: MarketIndex[]) {
+function buildMarketSummary(indices: MarketIndex[], themes: StrengthItem[]) {
   const kospi = indices.find((index) => index.name === "KOSPI");
   const kosdaq = indices.find((index) => index.name === "KOSDAQ");
+  const leadingThemes = themes.slice(0, 2).map((theme) => theme.name).join("·");
 
   if (!kospi || !kosdaq) {
     return "KOSPI/KOSDAQ 지수 데이터 일부가 제한되어 시장 방향을 보수적으로 표시합니다.";
@@ -289,7 +378,77 @@ function buildIndexSummary(indices: MarketIndex[]) {
   const leader = kospi.changePct >= kosdaq.changePct ? kospi : kosdaq;
   const direction = leader.changePct >= 0 ? "상승률" : "방어력";
 
-  return `${leader.name}의 ${direction}이 상대적으로 우세합니다. KOSPI ${formatPercent(kospi.changePct)}, KOSDAQ ${formatPercent(kosdaq.changePct)} 기준입니다.`;
+  return `${leader.name}의 ${direction}이 상대적으로 우세합니다. KOSPI ${formatPercent(kospi.changePct)}, KOSDAQ ${formatPercent(kosdaq.changePct)} 기준이며, 관심군에서는 ${leadingThemes || "주요 테마"} 순서로 상대 강도가 높습니다.`;
+}
+
+function deriveStrengthItems(stockList: StockSignal[], key: "theme" | "sector"): StrengthItem[] {
+  const grouped = new Map<string, StockSignal[]>();
+
+  for (const stock of stockList) {
+    const groupName = stock[key];
+    grouped.set(groupName, [...(grouped.get(groupName) ?? []), stock]);
+  }
+
+  return Array.from(grouped.entries())
+    .map(([name, members]) => {
+      const averageChange = average(members.map((stock) => stock.changePct));
+      const averageVolumeRatio = average(members.map((stock) => stock.volumeRatio));
+      const positiveCount = members.filter((stock) => stock.changePct >= 0).length;
+      const strength = Math.max(1, Math.min(100, Math.round(50 + averageChange * 7 + averageVolumeRatio * 8 + (positiveCount / members.length) * 12)));
+      const lead = members
+        .slice()
+        .sort((a, b) => b.changePct - a.changePct)
+        .slice(0, 2)
+        .map((stock) => stock.name)
+        .join(", ");
+
+      return {
+        name,
+        changePct: averageChange,
+        strength,
+        flow: `상승 ${positiveCount}/${members.length}, 평균 거래량 ${averageVolumeRatio.toFixed(1)}배`,
+        lead,
+      };
+    })
+    .sort((a, b) => b.strength - a.strength)
+    .slice(0, 5);
+}
+
+function applyStrengthRanks(stocks: StockSignal[], themes: StrengthItem[], sectors: StrengthItem[]) {
+  const themeRank = new Map(themes.map((theme, index) => [theme.name, index + 1]));
+  const sectorRank = new Map(sectors.map((sector, index) => [sector.name, index + 1]));
+
+  return stocks.map((stock) => ({
+    ...stock,
+    themeRank: themeRank.get(stock.theme) ?? stock.themeRank,
+    sectorRank: sectorRank.get(stock.sector) ?? stock.sectorRank,
+  }));
+}
+
+function getLiveRiskTags(stock: StockSignal, changePct: number, volumeRatio: number) {
+  const tags = stock.riskTags.filter((tag) => !["단기 급등", "가격 약세", "거래량 과열", "추세 확인 필요"].includes(tag));
+
+  if (changePct >= 5) tags.push("단기 급등");
+  if (changePct <= -3) tags.push("가격 약세");
+  if (volumeRatio >= 2.5) tags.push("거래량 과열");
+  if (changePct < 0 && volumeRatio < 1) tags.push("추세 확인 필요");
+
+  return Array.from(new Set(tags));
+}
+
+function getKoreanSessionProgress(timestamp?: number) {
+  if (!timestamp) return 1;
+
+  const marketTime = new Date(timestamp * 1000);
+  const minutes = marketTime.getUTCHours() * 60 + marketTime.getUTCMinutes() + 9 * 60;
+  const kstMinutes = minutes % (24 * 60);
+  const open = 9 * 60;
+  const close = 15 * 60 + 30;
+
+  if (kstMinutes <= open) return 0.05;
+  if (kstMinutes >= close) return 1;
+
+  return Math.max(0.05, Math.min(1, (kstMinutes - open) / (close - open)));
 }
 
 async function fetchDartDisclosures(stockList: StockSignal[]) {
@@ -472,6 +631,15 @@ function stripHtml(value: string) {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .trim();
+}
+
+function compactNumbers(values: Array<number | null | undefined>) {
+  return values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+}
+
+function average(values: number[]) {
+  if (values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function formatPercent(value: number) {

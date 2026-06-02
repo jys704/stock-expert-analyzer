@@ -171,7 +171,7 @@ function RankList({ title, items }: { title: string; items: StrengthItem[] }) {
               <p className="mt-1 text-xs text-slate-500">{item.flow} · {item.lead}</p>
             </div>
             <div className="text-right">
-              <p className="font-mono text-sm font-semibold text-red-600">{signed(item.changePct)}</p>
+              <p className={item.changePct >= 0 ? "font-mono text-sm font-semibold text-red-600" : "font-mono text-sm font-semibold text-blue-600"}>{signed(item.changePct)}</p>
               <p className="mt-1 text-[11px] text-slate-400">{item.strength}점</p>
             </div>
           </div>
@@ -230,16 +230,27 @@ function IndexPanel({ index }: { index: MarketIndex }) {
   );
 }
 
-function MarketPhase() {
+function MarketPhase({ themes, stocks }: { themes: StrengthItem[]; stocks: StockSignal[] }) {
+  const currentThemes = themes.slice(0, 2);
+  const nextThemes = themes.slice(2, 4);
+  const positiveStocks = stocks.filter((stock) => stock.changePct >= 0).length;
+  const volumeLeaders = stocks
+    .slice()
+    .sort((a, b) => b.volumeRatio - a.volumeRatio)
+    .slice(0, 2)
+    .map((stock) => `${stock.name} ${stock.volumeRatio.toFixed(1)}배`)
+    .join(", ");
+  const currentTitle = currentThemes.map((theme) => theme.name).join(" · ") || "데이터 확인 중";
+  const nextTitle = nextThemes.map((theme) => theme.name).join(" · ") || "후보 확인 중";
   const currentReasons = [
-    "AI 반도체와 전력기기에 가격 상승, 거래량 증가, 외국인·기관 수급이 동시에 붙었습니다.",
-    "거래대금 상위 종목이 대형주에서 소부장으로 확산되어 테마 지속성이 확인됩니다.",
-    "뉴스 키워드가 HBM, 전력망 투자, 수주 잔고로 모이며 실적 기대와 연결됩니다.",
+    currentThemes[0] ? `${currentThemes[0].name}의 상대 강도는 ${currentThemes[0].strength}점, 평균 등락률은 ${signed(currentThemes[0].changePct)}입니다.` : "테마 강도 데이터를 불러오는 중입니다.",
+    currentThemes[1] ? `${currentThemes[1].name}도 ${signed(currentThemes[1].changePct)} 흐름으로 상위권을 유지합니다.` : `${positiveStocks}/${stocks.length || 1}개 관심 종목이 플러스권입니다.`,
+    volumeLeaders ? `거래량 배수 상위는 ${volumeLeaders}입니다.` : "거래량 배수 데이터를 계산하는 중입니다.",
   ];
   const nextReasons = [
-    "2차전지 장비와 원전·전력은 가격 상승폭은 제한적이지만 거래량이 먼저 늘고 있습니다.",
-    "외국인·기관 초기 순매수와 뉴스 키워드가 동시에 생겨 다음 순환매 후보로 분류됩니다.",
-    "아직 과열 점수가 낮아 추격보다 눌림 후 재상승 확인에 적합합니다.",
+    nextThemes[0] ? `${nextThemes[0].name}은 현재 ${nextThemes[0].strength}점으로 다음 관찰 구간에 있습니다.` : "후순위 테마 데이터가 부족해 보수적으로 관찰합니다.",
+    nextThemes[1] ? `${nextThemes[1].name}은 ${signed(nextThemes[1].changePct)} 흐름이라 반등 여부를 확인해야 합니다.` : "테마 확산 여부는 추가 데이터 갱신 후 확인합니다.",
+    "후보군은 추격보다 거래량 재증가, 뉴스·공시 신호, 지수 방향을 함께 확인하는 방식으로 봅니다.",
   ];
 
   return (
@@ -252,7 +263,7 @@ function MarketPhase() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-2xl font-semibold tracking-[-0.02em] text-slate-950">AI 반도체 · 전력기기</p>
+          <p className="text-2xl font-semibold tracking-[-0.02em] text-slate-950">{currentTitle}</p>
           <div className="mt-4 space-y-2">
             {currentReasons.map((reason) => (
               <p key={reason} className="flex gap-2 text-sm leading-6 text-slate-700">
@@ -272,7 +283,7 @@ function MarketPhase() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-2xl font-semibold tracking-[-0.02em] text-slate-950">2차전지 장비 · 원전/전력</p>
+          <p className="text-2xl font-semibold tracking-[-0.02em] text-slate-950">{nextTitle}</p>
           <div className="mt-4 space-y-2">
             {nextReasons.map((reason) => (
               <p key={reason} className="flex gap-2 text-sm leading-6 text-slate-700">
@@ -559,7 +570,7 @@ export default function Home() {
         </section>
 
         <section className="grid min-w-0 gap-4 lg:grid-cols-[1fr_360px]">
-          <MarketPhase />
+          <MarketPhase themes={themes} stocks={stocks} />
           <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
