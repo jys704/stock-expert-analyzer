@@ -81,11 +81,20 @@ type ScoreModelItem = {
   rule: string;
 };
 
+type BreakingNewsItem = {
+  title: string;
+  summary: string;
+  source: string;
+  url: string;
+  publishedAt: string;
+};
+
 type MarketSnapshot = {
   asOf: string;
   source: "sample" | "yahoo" | "naver";
   sourceDetail: string;
   providers: ProviderStatus[];
+  breakingNews: BreakingNewsItem[];
   marketSummary: string;
   briefing: string;
   indices: MarketIndex[];
@@ -143,6 +152,18 @@ function unique(values: string[]) {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b, "ko"));
 }
 
+function formatNewsTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "방금 전";
+
+  return date.toLocaleString("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
   const response = await fetch("/api/market", {
     headers: { accept: "application/json" },
@@ -178,6 +199,44 @@ function RankList({ title, items }: { title: string; items: StrengthItem[] }) {
         ))}
       </div>
     </div>
+  );
+}
+
+function BreakingNewsPanel({ items }: { items: BreakingNewsItem[] }) {
+  return (
+    <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
+      <CardHeader className="flex flex-row items-center justify-between pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Newspaper className="h-5 w-5 text-slate-600" />
+          실시간 뉴스·속보
+        </CardTitle>
+        <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">{items.length ? "NAVER 최신순" : "대기 중"}</Badge>
+      </CardHeader>
+      <CardContent>
+        {items.length ? (
+          <div className="grid gap-3 lg:grid-cols-2">
+            {items.slice(0, 8).map((item) => (
+              <a
+                key={`${item.url}-${item.publishedAt}`}
+                href={item.url}
+                target="_blank"
+                rel="noreferrer"
+                className="block rounded-md border border-slate-100 p-3 transition hover:border-slate-300 hover:bg-slate-50"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 truncate text-xs text-slate-500">{item.source}</span>
+                  <span className="shrink-0 font-mono text-[11px] text-slate-400">{formatNewsTime(item.publishedAt)}</span>
+                </div>
+                <p className="mt-2 line-clamp-2 text-sm font-medium leading-6 text-slate-950">{item.title}</p>
+                {item.summary ? <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{item.summary}</p> : null}
+              </a>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm leading-6 text-slate-500">네이버 뉴스 API 키가 연결되면 최신 증시 뉴스가 자동으로 표시됩니다.</p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -352,6 +411,7 @@ export default function Home() {
   const briefing = snapshot?.briefing ?? "시장 데이터를 불러오는 중입니다.";
   const sourceDetail = snapshot?.sourceDetail ?? "시장 데이터를 불러오는 중입니다.";
   const providers = snapshot?.providers ?? [];
+  const breakingNews = snapshot?.breakingNews ?? [];
   const dataTime = snapshot?.asOf
     ? new Date(snapshot.asOf).toLocaleString("ko-KR", {
       month: "2-digit",
@@ -366,7 +426,7 @@ export default function Home() {
     () => stocks.map((stock) => ({ stock, score: getScore(stock) })).sort((a, b) => b.score.total - a.score.total),
     [stocks],
   );
-  const recommendations = rankedStocks.slice(0, 3).map((item) => item.stock);
+  const recommendations = rankedStocks.slice(0, 10).map((item) => item.stock);
 
   const filteredStocks = useMemo(() => {
     return rankedStocks
@@ -428,6 +488,8 @@ export default function Home() {
           <RankList title="오늘 강한 테마" items={themes} />
           <RankList title="오늘 강한 업종" items={sectors} />
         </section>
+
+        <BreakingNewsPanel items={breakingNews} />
 
         <section className="grid gap-3 md:grid-cols-3">
           {providers.map((provider) => (
@@ -518,7 +580,7 @@ export default function Home() {
                 <BarChart3 className="h-5 w-5 text-slate-600" />
                 현재 강세 종목 리스트
               </CardTitle>
-              <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">{filteredStocks.length}개</Badge>
+              <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">{filteredStocks.length}/{stocks.length}개</Badge>
             </CardHeader>
             <CardContent>
               <div className="overflow-x-auto">
@@ -596,15 +658,15 @@ export default function Home() {
         <section>
           <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <div>
-              <h2 className="text-2xl font-semibold tracking-[-0.03em]">오늘의 추천 종목 3선</h2>
-              <p className="mt-1 text-sm text-slate-500">종합 점수 기반 자동 선별 결과입니다. 확신형 매수 권유가 아닌 투자 참고용입니다.</p>
+              <h2 className="text-2xl font-semibold tracking-[-0.03em]">오늘의 추천 종목 10선</h2>
+              <p className="mt-1 text-sm text-slate-500">종합 점수 기반 자동 선별 10개 종목입니다. 확신형 매수 권유가 아닌 투자 참고용입니다.</p>
             </div>
             <div className="flex items-center gap-3">
               <MiniBars values={recommendations.map((stock) => getScore(stock).total)} />
               <span className="text-xs text-slate-400">추천 점수 분포</span>
             </div>
           </div>
-          <div className="grid gap-4 lg:grid-cols-3">
+          <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
             {recommendations.map((stock, index) => <RecommendationCard key={stock.code} stock={stock} rank={index + 1} />)}
           </div>
         </section>

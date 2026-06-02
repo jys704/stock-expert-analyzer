@@ -49,11 +49,16 @@ type StockSignal = {
   earlySignal: boolean;
 };
 
+type LiveStockSignal = StockSignal & {
+  regularMarketTime?: number;
+};
+
 type MarketSnapshot = {
   asOf: string;
   source: "sample" | "yahoo" | "naver";
   sourceDetail: string;
   providers: ProviderStatus[];
+  breakingNews: BreakingNewsItem[];
   marketSummary: string;
   briefing: string;
   indices: MarketIndex[];
@@ -78,6 +83,16 @@ type NaverNewsItem = {
   title?: string;
   description?: string;
   pubDate?: string;
+  originallink?: string;
+  link?: string;
+};
+
+type BreakingNewsItem = {
+  title: string;
+  summary: string;
+  source: string;
+  url: string;
+  publishedAt: string;
 };
 
 type YahooChartResponse = {
@@ -131,6 +146,27 @@ type NaverRealtimeData = {
   aa?: number;
 };
 
+type NaverMarketListResponse = {
+  stocks?: NaverMarketStock[];
+  totalCount?: number;
+  page?: number;
+  pageSize?: number;
+};
+
+type NaverMarketStock = {
+  itemCode?: string;
+  stockName?: string;
+  closePriceRaw?: string;
+  fluctuationsRatio?: string;
+  accumulatedTradingVolumeRaw?: string;
+  accumulatedTradingValueRaw?: string;
+  marketValueRaw?: string;
+  localTradedAt?: string;
+  stockExchangeType?: {
+    name?: Market;
+  };
+};
+
 const YAHOO_STOCK_SYMBOLS: Record<string, string> = {
   "000660": "000660.KS",
   "058470": "058470.KQ",
@@ -156,10 +192,11 @@ function provider(
 
 async function buildSnapshot(): Promise<MarketSnapshot> {
   const base = getBaseSnapshot();
-  const [marketResult, disclosureResult, newsResult] = await Promise.allSettled([
+  const [marketResult, disclosureResult, newsResult, breakingNewsResult] = await Promise.allSettled([
     fetchNaverMarket(base.stocks).catch(() => fetchYahooMarket(base.stocks)),
     fetchDartDisclosures(base.stocks),
     fetchNaverNews(base.stocks),
+    fetchBreakingNews(),
   ]);
 
   let snapshot = base;
@@ -192,6 +229,13 @@ async function buildSnapshot(): Promise<MarketSnapshot> {
       snapshot,
       provider("news", "뉴스", "error", "네이버 뉴스 API 호출에 실패해 기본 뉴스 문구를 표시합니다.", ["NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET"]),
     );
+  }
+
+  if (breakingNewsResult.status === "fulfilled") {
+    snapshot = {
+      ...snapshot,
+      breakingNews: breakingNewsResult.value,
+    };
   }
 
   return {
@@ -244,6 +288,7 @@ function getBaseSnapshot(): MarketSnapshot {
     source: "sample",
     sourceDetail: providers.map((item) => `${item.label}: ${item.detail}`).join(" "),
     providers,
+    breakingNews: [],
     marketSummary: "코스닥 강도가 우세하고 AI 반도체·전력기기에 수급과 거래대금이 집중됩니다.",
     briefing: "오늘 시장은 코스닥 강도가 코스피보다 우세하며, AI 반도체와 전력기기에 수급과 거래대금이 집중됩니다. 뉴스와 공시는 외부 API로 보강하며, 단기 급등 종목은 분할 접근과 손절 기준을 먼저 정해야 합니다.",
     indices,
@@ -293,7 +338,7 @@ async function fetchNaverMarket(baseStocks: StockSignal[]): Promise<YahooMarketD
   const [kospi, kosdaq, liveStocks] = await Promise.all([
     fetchNaverIndex("KOSPI"),
     fetchNaverIndex("KOSDAQ"),
-    Promise.all(baseStocks.map(fetchNaverStock)),
+    fetchNaverStockUniverse().catch(() => Promise.all(baseStocks.map(fetchNaverStock))),
   ]);
   const asOfTime = Math.max(
     kospi.asOfTime,
@@ -303,13 +348,89 @@ async function fetchNaverMarket(baseStocks: StockSignal[]): Promise<YahooMarketD
 
   return {
     source: "naver",
-    status: provider("price", "시세", "connected", "네이버 금융 realtime 시세로 지수, 종목 등락률, 거래량, 거래대금을 갱신했습니다."),
+    status: provider("price", "시세", "connected", `네이버 금융 realtime 시세로 지수와 KOSPI/KOSDAQ ${liveStocks.length}개 종목의 등락률, 거래량, 거래대금을 갱신했습니다.`),
     asOf: asOfTime > 0 ? new Date(asOfTime).toISOString() : new Date().toISOString(),
     indices: [
       { name: "KOSPI" as const, value: kospi.value, changePct: kospi.changePct },
       { name: "KOSDAQ" as const, value: kosdaq.value, changePct: kosdaq.changePct },
     ],
     stocks: liveStocks.map(({ regularMarketTime, ...stock }) => stock),
+  };
+}
+
+async function fetchNaverStockUniverse(): Promise<LiveStockSignal[]> {
+  const [kospi, kosdaq] = await Promise.all([
+    fetchNaverMarketStocks("KOSPI"),
+    fetchNaverMarketStocks("KOSDAQ"),
+  ]);
+  const stocks = [...kospi, ...kosdaq]
+    .map(toLiveStockSignal)
+    .filter((stock): stock is LiveStockSignal => Boolean(stock));
+
+  if (stocks.length === 0) {
+    throw new Error("Naver market list returned no stocks");
+  }
+
+  return stocks;
+}
+
+async function fetchNaverMarketStocks(market: Market): Promise<NaverMarketStock[]> {
+  const first = await fetchNaverMarketPage(market, 1);
+  const pageSize = first.pageSize || 100;
+  const totalPages = Math.max(1, Math.ceil((first.totalCount ?? first.stocks?.length ?? 0) / pageSize));
+  const pages = Array.from({ length: Math.max(0, totalPages - 1) }, (_, index) => index + 2);
+  const rest = await mapLimit(pages, 6, (page) => fetchNaverMarketPage(market, page).catch(() => ({ stocks: [] })));
+
+  return [first, ...rest].flatMap((page) => page.stocks ?? []);
+}
+
+async function fetchNaverMarketPage(market: Market, page: number) {
+  const url = new URL(`https://m.stock.naver.com/api/stocks/marketValue/${market}`);
+  url.searchParams.set("page", String(page));
+  url.searchParams.set("pageSize", "100");
+
+  return fetchNaverJson<NaverMarketListResponse>(url, 5_000);
+}
+
+function toLiveStockSignal(item: NaverMarketStock): LiveStockSignal | undefined {
+  const code = item.itemCode?.trim();
+  const name = item.stockName?.trim();
+  const market = item.stockExchangeType?.name;
+
+  if (!code || !name || (market !== "KOSPI" && market !== "KOSDAQ")) {
+    return undefined;
+  }
+
+  const changePct = parseNaverNumber(item.fluctuationsRatio);
+  const turnoverBn = parseNaverNumber(item.accumulatedTradingValueRaw) / 100_000_000;
+  const marketValueBn = parseNaverNumber(item.marketValueRaw) / 100_000_000;
+  const turnoverPct = marketValueBn > 0 ? (turnoverBn / marketValueBn) * 100 : 0;
+  const volumeRatio = Math.max(0.1, Math.min(9.9, turnoverPct > 0 ? turnoverPct * 2 : Math.log10(turnoverBn + 10) / 2));
+  const profile = classifyStock(name, market);
+  const trendScore = Math.max(1, Math.min(20, Math.round(8 + changePct * 1.6 + Math.min(volumeRatio, 4) * 2)));
+  const riskTags = getBroadMarketRiskTags(changePct, volumeRatio, turnoverBn);
+  const regularMarketTime = parseNaverTime(item.localTradedAt);
+
+  return {
+    code,
+    name,
+    market,
+    sector: profile.sector,
+    theme: profile.theme,
+    changePct,
+    volumeRatio,
+    turnoverBn,
+    foreignNetBn: 0,
+    institutionNetBn: 0,
+    programNetBn: 0,
+    news: "네이버 금융 실시간 시세 반영",
+    disclosure: "최근 공시 확인 전",
+    trendScore,
+    themeRank: 99,
+    sectorRank: 99,
+    riskTags,
+    earlySignal: changePct > 0 || volumeRatio >= 1.5,
+    regularMarketTime,
   };
 }
 
@@ -498,13 +619,14 @@ function applyYahooMarket(snapshot: MarketSnapshot, marketData: YahooMarketData)
   const sectors = deriveStrengthItems(marketData.stocks, "sector");
   const stocks = applyStrengthRanks(marketData.stocks, themes, sectors);
   const marketSummary = buildMarketSummary(indices, themes);
+  const sourceName = marketData.source === "naver" ? "네이버 금융 실시간 시세" : "Yahoo Finance 지연 시세";
 
   return {
     ...snapshot,
     asOf: marketData.asOf,
     source: marketData.source,
     marketSummary,
-    briefing: `${marketSummary} 종목 등락률, 거래량, 거래대금은 Yahoo Finance 지연 시세를 반영했고 수급·뉴스·공시는 보강 데이터로 함께 계산했습니다.`,
+    briefing: `${marketSummary} 종목 등락률, 거래량, 거래대금은 ${sourceName}를 반영했고 수급·뉴스·공시는 보강 데이터로 함께 계산했습니다.`,
     indices,
     themes,
     sectors,
@@ -580,6 +702,73 @@ function getLiveRiskTags(stock: StockSignal, changePct: number, volumeRatio: num
   if (changePct < 0 && volumeRatio < 1) tags.push("추세 확인 필요");
 
   return Array.from(new Set(tags));
+}
+
+function getBroadMarketRiskTags(changePct: number, volumeRatio: number, turnoverBn: number) {
+  const tags: string[] = [];
+
+  if (changePct >= 8) tags.push("상한가 근접");
+  else if (changePct >= 5) tags.push("단기 급등");
+
+  if (changePct <= -5) tags.push("낙폭 확대");
+  else if (changePct <= -3) tags.push("가격 약세");
+
+  if (volumeRatio >= 4) tags.push("거래 집중");
+  if (turnoverBn >= 1000) tags.push("거래대금 상위");
+  if (changePct < 0 && volumeRatio < 0.5) tags.push("추세 확인 필요");
+
+  return tags;
+}
+
+function classifyStock(name: string, market: Market) {
+  const checks: Array<{ keywords: string[]; sector: string; theme: string }> = [
+    { keywords: ["삼성전자", "SK하이닉스", "하이닉스", "리노공업", "HPSP", "ISC", "주성", "원익", "이오테크닉스", "테크윙", "피에스케이", "한미반도체"], sector: "반도체", theme: "AI 반도체" },
+    { keywords: ["NAVER", "카카오", "더존", "안랩", "엔씨", "크래프톤", "넷마블", "위메이드", "펄어비스"], sector: "소프트웨어", theme: "AI 서비스" },
+    { keywords: ["LG에너지솔루션", "삼성SDI", "에코프로", "엘앤에프", "포스코퓨처", "POSCO", "천보", "대주전자", "나노신소재"], sector: "2차전지", theme: "2차전지" },
+    { keywords: ["셀트리온", "삼성바이오", "알테오젠", "리가켐", "제약", "바이오", "약품", "헬스케어", "케어젠", "보로노이", "유한양행"], sector: "제약·바이오", theme: "바이오 임상" },
+    { keywords: ["한화에어로", "한국항공", "LIG", "현대로템", "풍산", "스페코", "빅텍"], sector: "방산", theme: "방산" },
+    { keywords: ["두산에너빌리티", "HD현대일렉트릭", "LS ELECTRIC", "일진전기", "효성중공업", "제룡전기", "보성파워텍"], sector: "전기장비", theme: "원전·전력" },
+    { keywords: ["현대차", "기아", "현대모비스", "HL만도", "에스엘"], sector: "자동차", theme: "자동차" },
+    { keywords: ["KB금융", "신한지주", "하나금융", "우리금융", "삼성생명", "메리츠금융", "기업은행"], sector: "금융", theme: "금융" },
+    { keywords: ["HD현대", "한화오션", "삼성중공업", "한국조선", "조선", "STX"], sector: "조선·해운", theme: "조선" },
+    { keywords: ["아모레", "콜마", "코스맥스", "클리오", "실리콘투"], sector: "화장품", theme: "K뷰티" },
+  ];
+  const normalized = name.toUpperCase();
+  const hit = checks.find((item) => item.keywords.some((keyword) => normalized.includes(keyword.toUpperCase())));
+
+  if (hit) return { sector: hit.sector, theme: hit.theme };
+
+  return market === "KOSPI"
+    ? { sector: "기타 KOSPI", theme: "코스피 상대강도" }
+    : { sector: "기타 KOSDAQ", theme: "코스닥 상대강도" };
+}
+
+function parseNaverNumber(value?: string) {
+  if (!value) return 0;
+  const parsed = Number(value.replace(/[^\d.-]/g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseNaverTime(value?: string) {
+  if (!value) return 0;
+  const parsed = Date.parse(value.replace(/\./g, "-"));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, task: (item: T) => Promise<R>) {
+  const results: R[] = [];
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await task(items[index]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 function getKoreanSessionProgress(timestamp?: number) {
@@ -672,6 +861,44 @@ async function fetchNaverNews(stockList: StockSignal[]) {
   };
 }
 
+async function fetchBreakingNews(): Promise<BreakingNewsItem[]> {
+  const clientId = process.env.NAVER_CLIENT_ID?.trim();
+  const clientSecret = process.env.NAVER_CLIENT_SECRET?.trim();
+
+  if (!clientId || !clientSecret) {
+    return [];
+  }
+
+  const url = new URL("https://openapi.naver.com/v1/search/news.json");
+  url.searchParams.set("query", "증시 코스피 코스닥 특징주 주식");
+  url.searchParams.set("display", "20");
+  url.searchParams.set("sort", "date");
+
+  const body = await fetchJson<{ items?: NaverNewsItem[] }>(url, 4_000, {
+    headers: {
+      "X-Naver-Client-Id": clientId,
+      "X-Naver-Client-Secret": clientSecret,
+    },
+  });
+
+  return (body.items ?? [])
+    .map((item) => {
+      const title = stripHtml(item.title ?? "");
+      const summary = stripHtml(item.description ?? "");
+      const url = item.originallink || item.link || "";
+
+      return {
+        title,
+        summary,
+        source: getNewsSource(url),
+        url,
+        publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
+      };
+    })
+    .filter((item) => item.title && item.url)
+    .slice(0, 12);
+}
+
 function applyDisclosures(snapshot: MarketSnapshot, disclosures: DartDisclosure[]): MarketSnapshot {
   if (disclosures.length === 0) return snapshot;
 
@@ -726,6 +953,14 @@ function isRelevantNews(stock: StockSignal, item: NaverNewsItem) {
   return text.includes(name) || text.includes(code);
 }
 
+function getNewsSource(value: string) {
+  try {
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return "NAVER 뉴스";
+  }
+}
+
 function upsertProvider(snapshot: MarketSnapshot, next: ProviderStatus): MarketSnapshot {
   return {
     ...snapshot,
@@ -759,6 +994,23 @@ async function fetchJson<T>(input: URL, timeoutMs: number, init?: RequestInit): 
 
     if (!response.ok) {
       throw new Error(`Provider responded with ${response.status}`);
+    }
+
+    return await response.json() as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchNaverJson<T>(input: URL, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(input, { signal: controller.signal });
+
+    if (!response.ok) {
+      throw new Error(`Naver responded with ${response.status}`);
     }
 
     return await response.json() as T;
