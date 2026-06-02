@@ -51,7 +51,7 @@ type StockSignal = {
 
 type MarketSnapshot = {
   asOf: string;
-  source: "sample";
+  source: "sample" | "yahoo";
   sourceDetail: string;
   providers: ProviderStatus[];
   marketSummary: string;
@@ -80,6 +80,20 @@ type NaverNewsItem = {
   pubDate?: string;
 };
 
+type YahooChartResponse = {
+  chart?: {
+    result?: Array<{
+      meta?: {
+        regularMarketPrice?: number;
+        previousClose?: number;
+        chartPreviousClose?: number;
+        regularMarketTime?: number;
+      };
+    }>;
+    error?: unknown;
+  };
+};
+
 let cachedSnapshot: CachedSnapshot | undefined;
 
 function provider(
@@ -94,12 +108,23 @@ function provider(
 
 async function buildSnapshot(): Promise<MarketSnapshot> {
   const base = getBaseSnapshot();
-  const [disclosureResult, newsResult] = await Promise.allSettled([
+  const [indexResult, disclosureResult, newsResult] = await Promise.allSettled([
+    fetchYahooIndices(),
     fetchDartDisclosures(base.stocks),
     fetchNaverNews(base.stocks),
   ]);
 
   let snapshot = base;
+
+  if (indexResult.status === "fulfilled") {
+    snapshot = applyYahooIndices(snapshot, indexResult.value.indices, indexResult.value.asOf);
+    snapshot = upsertProvider(snapshot, indexResult.value.status);
+  } else {
+    snapshot = upsertProvider(
+      snapshot,
+      provider("price", "시세", "fallback", "Yahoo 지수 조회에 실패해 내장 샘플 지수를 표시합니다."),
+    );
+  }
 
   if (disclosureResult.status === "fulfilled") {
     snapshot = applyDisclosures(snapshot, disclosureResult.value.disclosures);
@@ -189,6 +214,82 @@ function getBaseSnapshot(): MarketSnapshot {
       { label: "리스크 감점", max: -20, rule: "단기 과열, 관리종목, 투자주의, 공시 불확실성" },
     ],
   };
+}
+
+async function fetchYahooIndices() {
+  const [kospi, kosdaq] = await Promise.all([
+    fetchYahooIndex("KOSPI", "^KS11"),
+    fetchYahooIndex("KOSDAQ", "^KQ11"),
+  ]);
+
+  const asOfTime = Math.max(kospi.regularMarketTime ?? 0, kosdaq.regularMarketTime ?? 0);
+
+  return {
+    status: provider("price", "시세", "connected", "Yahoo Finance chart 지연 시세로 KOSPI/KOSDAQ 지수와 등락률을 갱신했습니다."),
+    asOf: asOfTime > 0 ? new Date(asOfTime * 1000).toISOString() : new Date().toISOString(),
+    indices: [
+      { name: "KOSPI" as const, value: kospi.value, changePct: kospi.changePct },
+      { name: "KOSDAQ" as const, value: kosdaq.value, changePct: kosdaq.changePct },
+    ],
+  };
+}
+
+async function fetchYahooIndex(name: Market, symbol: string) {
+  const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
+  url.searchParams.set("range", "1d");
+  url.searchParams.set("interval", "1m");
+
+  const body = await fetchJson<YahooChartResponse>(url, 4_000);
+  const meta = body.chart?.result?.[0]?.meta;
+  const value = meta?.regularMarketPrice;
+  const previousClose = meta?.previousClose ?? meta?.chartPreviousClose;
+
+  if (typeof value !== "number" || typeof previousClose !== "number" || previousClose === 0) {
+    throw new Error(`${name} Yahoo chart data is incomplete`);
+  }
+
+  return {
+    value,
+    changePct: ((value - previousClose) / previousClose) * 100,
+    regularMarketTime: meta?.regularMarketTime,
+  };
+}
+
+function applyYahooIndices(snapshot: MarketSnapshot, liveIndices: Array<Pick<MarketIndex, "name" | "value" | "changePct">>, asOf: string): MarketSnapshot {
+  const indices = snapshot.indices.map((index) => {
+    const live = liveIndices.find((item) => item.name === index.name);
+    if (!live) return index;
+
+    return {
+      ...index,
+      value: live.value,
+      changePct: live.changePct,
+    };
+  });
+  const marketSummary = buildIndexSummary(indices);
+
+  return {
+    ...snapshot,
+    asOf,
+    source: "yahoo",
+    marketSummary,
+    briefing: `${marketSummary} 테마·종목 점수는 샘플 수급 데이터에 DART 공시와 네이버 뉴스를 보강한 참고용 결과입니다.`,
+    indices,
+  };
+}
+
+function buildIndexSummary(indices: MarketIndex[]) {
+  const kospi = indices.find((index) => index.name === "KOSPI");
+  const kosdaq = indices.find((index) => index.name === "KOSDAQ");
+
+  if (!kospi || !kosdaq) {
+    return "KOSPI/KOSDAQ 지수 데이터 일부가 제한되어 시장 방향을 보수적으로 표시합니다.";
+  }
+
+  const leader = kospi.changePct >= kosdaq.changePct ? kospi : kosdaq;
+  const direction = leader.changePct >= 0 ? "상승률" : "방어력";
+
+  return `${leader.name}의 ${direction}이 상대적으로 우세합니다. KOSPI ${formatPercent(kospi.changePct)}, KOSDAQ ${formatPercent(kosdaq.changePct)} 기준입니다.`;
 }
 
 async function fetchDartDisclosures(stockList: StockSignal[]) {
@@ -371,6 +472,11 @@ function stripHtml(value: string) {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .trim();
+}
+
+function formatPercent(value: number) {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}%`;
 }
 
 function getKstYmd(offsetDays: number) {
