@@ -156,6 +156,7 @@ type NaverMarketListResponse = {
 type NaverMarketStock = {
   itemCode?: string;
   stockName?: string;
+  stockType?: string;
   closePriceRaw?: string;
   fluctuationsRatio?: string;
   accumulatedTradingVolumeRaw?: string;
@@ -401,6 +402,10 @@ function toLiveStockSignal(item: NaverMarketStock): LiveStockSignal | undefined 
     return undefined;
   }
 
+  if (!isCompanyStockName(name)) {
+    return undefined;
+  }
+
   const changePct = parseNaverNumber(item.fluctuationsRatio);
   const turnoverBn = parseNaverNumber(item.accumulatedTradingValueRaw) / 100_000_000;
   const marketValueBn = parseNaverNumber(item.marketValueRaw) / 100_000_000;
@@ -512,8 +517,10 @@ async function fetchNaverRealtime(query: string) {
 
 function signedNaverRate(item?: NaverRealtimeData) {
   if (typeof item?.cr !== "number") return undefined;
+  if (item.rf === "3") return 0;
+  if (item.cr < 0) return item.cr;
   const sign = item.rf === "4" || item.rf === "5" ? -1 : 1;
-  return item.rf === "3" ? 0 : item.cr * sign;
+  return Math.abs(item.cr) * sign;
 }
 
 async function fetchYahooIndex(name: Market, symbol: string) {
@@ -741,6 +748,64 @@ function classifyStock(name: string, market: Market) {
   return market === "KOSPI"
     ? { sector: "기타 KOSPI", theme: "코스피 상대강도" }
     : { sector: "기타 KOSDAQ", theme: "코스닥 상대강도" };
+}
+
+function isCompanyStockName(name: string) {
+  const compact = name.replace(/\s+/g, "").toUpperCase();
+  const productPrefixes = [
+    "KODEX",
+    "TIGER",
+    "SOL",
+    "ACE",
+    "RISE",
+    "KBSTAR",
+    "HANARO",
+    "KOSEF",
+    "ARIRANG",
+    "KINDEX",
+    "TIMEFOLIO",
+    "PLUS",
+    "UNICORN",
+    "WOORI",
+    "1Q",
+    "마이다스",
+    "파워",
+    "마이티",
+    "BNK",
+    "HK",
+  ];
+  const productKeywords = [
+    "ETF",
+    "ETN",
+    "ELW",
+    "인버스",
+    "레버리지",
+    "선물",
+    "채권",
+    "혼합",
+    "액티브",
+    "커버드콜",
+    "합성",
+    "국채",
+    "회사채",
+    "단일종목",
+    "나스닥",
+    "NASDAQ",
+    "S&P",
+    "MSCI",
+    "코스피200",
+    "코스닥150",
+    "스팩",
+    "SPAC",
+    "리츠",
+  ];
+
+  if (productPrefixes.some((prefix) => compact.startsWith(prefix))) return false;
+  if (productKeywords.some((keyword) => compact.includes(keyword.toUpperCase()))) return false;
+  if (/[0-9]+X$/.test(compact)) return false;
+  if (/우(B)?$/.test(compact)) return false;
+
+  return true;
 }
 
 function parseNaverNumber(value?: string) {
