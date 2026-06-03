@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -16,6 +16,7 @@ import {
   KeyRound,
   LineChart,
   Newspaper,
+  RefreshCw,
   Search,
   ShieldAlert,
   Sparkles,
@@ -64,6 +65,9 @@ type StockSignal = {
   programNetBn: number | null;
   news: string;
   disclosure: string;
+  disclosureCategory: string;
+  disclosureTone: "positive" | "watch" | "neutral";
+  disclosureScore: number;
   trendScore: number;
   themeRank: number;
   sectorRank: number;
@@ -148,6 +152,12 @@ function flowTone(value: number | null) {
     : "border-b border-slate-100 px-3 py-3 text-right font-mono text-blue-600";
 }
 
+function disclosureBadgeClass(tone: StockSignal["disclosureTone"]) {
+  if (tone === "positive") return "rounded-md border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (tone === "watch") return "rounded-md border-amber-200 bg-amber-50 text-amber-700";
+  return "rounded-md border-slate-200 bg-white text-slate-500";
+}
+
 function getScore(stock: StockSignal): ScoreBreakdown {
   const foreignNetBn = numeric(stock.foreignNetBn);
   const institutionNetBn = numeric(stock.institutionNetBn);
@@ -156,7 +166,7 @@ function getScore(stock: StockSignal): ScoreBreakdown {
   const volume = stock.volumeRatio >= 2 ? 15 : stock.volumeRatio >= 1.7 ? 12 : stock.volumeRatio >= 1.4 ? 9 : stock.volumeRatio >= 1.15 ? 5 : 2;
   const turnover = stock.turnoverBn >= 3000 ? 10 : stock.turnoverBn >= 1000 ? 8 : stock.turnoverBn >= 500 ? 6 : 3;
   const news = stock.news.includes("특이") ? 3 : 10;
-  const disclosure = stock.disclosure.includes("특이") ? 3 : 10;
+  const disclosure = Math.max(2, Math.min(10, 5 + stock.disclosureScore));
   const theme = Math.max(3, 12 - stock.themeRank * 2);
   const sector = Math.max(3, 12 - stock.sectorRank * 2);
   const trend = stock.trendScore;
@@ -196,8 +206,8 @@ function formatNewsTime(value: string) {
   });
 }
 
-async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
-  const response = await fetch("/api/market", {
+async function fetchMarketSnapshot(forceRefresh = false): Promise<MarketSnapshot> {
+  const response = await fetch(forceRefresh ? "/api/market?refresh=1" : "/api/market", {
     headers: { accept: "application/json" },
   });
 
@@ -411,7 +421,13 @@ function RecommendationCard({ stock, rank }: { stock: StockSignal; rank: number 
         <p><span className="font-semibold text-slate-950">추천 사유</span> {stock.theme} 주도 테마 안에서 수급, 거래량, 추세 점수가 함께 높습니다.</p>
         <p><span className="font-semibold text-slate-950">수급 포인트</span> 외국인 {formatFlow(stock.foreignNetBn)}, 기관 {formatFlow(stock.institutionNetBn)}, 프로그램 {hasProgram ? formatFlow(stock.programNetBn) : "확인 불가"}.</p>
         <p><span className="font-semibold text-slate-950">거래 포인트</span> 거래량 {stock.volumeRatio.toFixed(1)}배, 거래대금 {formatNumber(stock.turnoverBn)}억.</p>
-        <p><span className="font-semibold text-slate-950">뉴스·공시</span> {stock.news} · {stock.disclosure}</p>
+        <div>
+          <p><span className="font-semibold text-slate-950">뉴스·공시</span> {stock.news}</p>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className={disclosureBadgeClass(stock.disclosureTone)}>{stock.disclosureCategory}</Badge>
+            <span className="text-slate-600">{stock.disclosure}</span>
+          </div>
+        </div>
         <p className="flex gap-2 text-amber-700">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
           리스크: {stock.riskTags.length ? stock.riskTags.join(", ") : "명확한 단기 위험 신호는 적지만 시장 변동성 확인 필요"}
@@ -422,10 +438,16 @@ function RecommendationCard({ stock, rank }: { stock: StockSignal; rank: number 
 }
 
 export default function Home() {
+  const forceRefreshRef = useRef(false);
   const snapshotQuery = useQuery({
     queryKey: ["market-snapshot"],
-    queryFn: fetchMarketSnapshot,
-    refetchInterval: 60_000,
+    queryFn: () => {
+      const forceRefresh = forceRefreshRef.current;
+      forceRefreshRef.current = false;
+      return fetchMarketSnapshot(forceRefresh);
+    },
+    refetchInterval: 30_000,
+    staleTime: 15_000,
   });
   const [market, setMarket] = useState<"전체" | Market>("전체");
   const [theme, setTheme] = useState("전체");
@@ -455,6 +477,10 @@ export default function Home() {
       minute: "2-digit",
     })
     : "불러오는 중";
+  const handleManualRefresh = () => {
+    forceRefreshRef.current = true;
+    void snapshotQuery.refetch();
+  };
 
   const themeOptions = useMemo(() => ["전체", ...unique(stocks.map((stock) => stock.theme))], [stocks]);
   const rankedStocks = useMemo(
@@ -500,6 +526,17 @@ export default function Home() {
             {snapshot?.source === "sample" ? <Badge variant="outline" className="h-8 rounded-md border-amber-200 bg-amber-50 text-amber-700">샘플 공급자</Badge> : null}
             {snapshot?.source === "yahoo" ? <Badge variant="outline" className="h-8 rounded-md border-emerald-200 bg-emerald-50 text-emerald-700">야후 시세</Badge> : null}
             {snapshot?.source === "naver" ? <Badge variant="outline" className="h-8 rounded-md border-emerald-200 bg-emerald-50 text-emerald-700">네이버 시세</Badge> : null}
+            <Badge variant="outline" className="h-8 rounded-md border-blue-200 bg-blue-50 text-blue-700">30초 자동 갱신</Badge>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-8 rounded-md px-3 text-xs"
+              onClick={handleManualRefresh}
+              disabled={snapshotQuery.isFetching}
+            >
+              <RefreshCw className={snapshotQuery.isFetching ? "mr-1 h-3.5 w-3.5 animate-spin" : "mr-1 h-3.5 w-3.5"} />
+              새로고침
+            </Button>
             <Badge className="h-8 rounded-md bg-slate-950 text-white hover:bg-slate-950">투자 참고용</Badge>
           </div>
         </div>
@@ -646,12 +683,13 @@ export default function Home() {
             </CardHeader>
             <CardContent>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[920px] border-separate border-spacing-0 text-left text-sm">
+                <table className="w-full min-w-[1040px] border-separate border-spacing-0 text-left text-sm">
                   <thead>
                     <tr className="border-b border-slate-200 text-xs text-slate-500">
                       <th className="border-b border-slate-200 px-3 py-2 font-medium">종목명</th>
                       <th className="border-b border-slate-200 px-3 py-2 font-medium">시장</th>
                       <th className="border-b border-slate-200 px-3 py-2 font-medium">업종·테마</th>
+                      <th className="border-b border-slate-200 px-3 py-2 font-medium">공시</th>
                       <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">등락률</th>
                       <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">거래량</th>
                       <th className="border-b border-slate-200 px-3 py-2 text-right font-medium">외인</th>
@@ -662,7 +700,7 @@ export default function Home() {
                   <tbody>
                     {pagedStocks.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-3 py-10 text-center text-sm text-slate-500">
+                        <td colSpan={9} className="px-3 py-10 text-center text-sm text-slate-500">
                           조건에 맞는 종목이 없습니다. 검색어 또는 필터를 조정해 주세요.
                         </td>
                       </tr>
@@ -679,6 +717,9 @@ export default function Home() {
                         <td className="border-b border-slate-100 px-3 py-3">
                           <p className="text-slate-800">{stock.sector}</p>
                           <p className="text-xs text-slate-500">{stock.theme}</p>
+                        </td>
+                        <td className="border-b border-slate-100 px-3 py-3">
+                          <Badge variant="outline" className={disclosureBadgeClass(stock.disclosureTone)}>{stock.disclosureCategory}</Badge>
                         </td>
                         <td className={stock.changePct >= 0 ? "border-b border-slate-100 px-3 py-3 text-right font-mono font-semibold text-red-600" : "border-b border-slate-100 px-3 py-3 text-right font-mono font-semibold text-blue-600"}>
                           {signed(stock.changePct)}
@@ -823,7 +864,7 @@ export default function Home() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm leading-6 text-slate-700">
-              <p>실시간 API 연동, 뉴스 감성 분석, 공시 자동 분류, 알림, 포트폴리오 추적, 사용자별 관심종목 저장.</p>
+              <p>뉴스 감성 분석, 알림, 포트폴리오 추적, 사용자별 관심종목 저장, 고급 리스크 경보.</p>
               <p>복잡한 백테스트와 고급 차트는 MVP 이후에 붙이는 편이 좋습니다.</p>
             </CardContent>
           </Card>

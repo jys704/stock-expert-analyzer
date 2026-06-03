@@ -11,6 +11,8 @@ type ProviderStatus = {
   requiredEnv?: string[];
 };
 
+type DisclosureTone = "positive" | "watch" | "neutral";
+
 type MarketIndex = {
   name: Market;
   value: number;
@@ -42,6 +44,9 @@ type StockSignal = {
   programNetBn: number | null;
   news: string;
   disclosure: string;
+  disclosureCategory: string;
+  disclosureTone: DisclosureTone;
+  disclosureScore: number;
   trendScore: number;
   themeRank: number;
   sectorRank: number;
@@ -75,8 +80,16 @@ type CachedSnapshot = {
 
 type DartDisclosure = {
   corp_name?: string;
+  stock_code?: string;
   report_nm?: string;
   rcept_dt?: string;
+};
+
+type ClassifiedDisclosure = {
+  category: string;
+  tone: DisclosureTone;
+  score: number;
+  summary: string;
 };
 
 type NaverNewsItem = {
@@ -202,6 +215,16 @@ function provider(
   return { id, label, state, detail, requiredEnv };
 }
 
+function createBaseStock(stock: Omit<StockSignal, "disclosure" | "disclosureCategory" | "disclosureTone" | "disclosureScore">): StockSignal {
+  return {
+    ...stock,
+    disclosure: "최근 공시 확인 전",
+    disclosureCategory: "미분류",
+    disclosureTone: "neutral",
+    disclosureScore: 0,
+  };
+}
+
 async function buildSnapshot(): Promise<MarketSnapshot> {
   const base = getBaseSnapshot();
   const [marketResult, disclosureResult, newsResult, breakingNewsResult] = await Promise.allSettled([
@@ -279,14 +302,14 @@ function getBaseSnapshot(): MarketSnapshot {
   ];
 
   const stocks: StockSignal[] = [
-    { code: "000660", name: "SK하이닉스", market: "KOSPI", sector: "반도체", theme: "AI 반도체", changePct: 5.42, volumeRatio: 2.4, turnoverBn: 12850, foreignNetBn: 1820, institutionNetBn: 690, programNetBn: 410, news: "HBM 공급 확대 기대", disclosure: "최근 공시 확인 전", trendScore: 18, themeRank: 1, sectorRank: 1, riskTags: ["단기 급등"], earlySignal: false },
-    { code: "058470", name: "리노공업", market: "KOSDAQ", sector: "반도체", theme: "AI 반도체", changePct: 4.18, volumeRatio: 2.1, turnoverBn: 1420, foreignNetBn: 210, institutionNetBn: 130, programNetBn: 48, news: "AI 테스트 소켓 수요", disclosure: "최근 공시 확인 전", trendScore: 17, themeRank: 1, sectorRank: 1, riskTags: [], earlySignal: false },
-    { code: "267260", name: "HD현대일렉트릭", market: "KOSPI", sector: "전기장비", theme: "전력기기", changePct: 3.72, volumeRatio: 1.9, turnoverBn: 3380, foreignNetBn: 95, institutionNetBn: 340, programNetBn: 62, news: "북미 전력망 투자 기대", disclosure: "최근 공시 확인 전", trendScore: 18, themeRank: 2, sectorRank: 2, riskTags: [], earlySignal: false },
-    { code: "066970", name: "엘앤에프", market: "KOSPI", sector: "2차전지", theme: "2차전지 장비", changePct: 2.12, volumeRatio: 1.7, turnoverBn: 980, foreignNetBn: 74, institutionNetBn: 54, programNetBn: 18, news: "배터리 소재 업황 저점 기대", disclosure: "최근 공시 확인 전", trendScore: 12, themeRank: 3, sectorRank: 4, riskTags: ["업황 변동성"], earlySignal: true },
-    { code: "196170", name: "알테오젠", market: "KOSDAQ", sector: "제약·바이오", theme: "바이오 임상", changePct: 3.05, volumeRatio: 1.8, turnoverBn: 2210, foreignNetBn: 160, institutionNetBn: -42, programNetBn: 30, news: "기술이전 기대감", disclosure: "최근 공시 확인 전", trendScore: 15, themeRank: 4, sectorRank: 3, riskTags: ["이벤트 변동성"], earlySignal: true },
-    { code: "047810", name: "한국항공우주", market: "KOSPI", sector: "방산", theme: "방산", changePct: 1.62, volumeRatio: 1.5, turnoverBn: 760, foreignNetBn: -18, institutionNetBn: 88, programNetBn: 12, news: "수출 협상 보도", disclosure: "최근 공시 확인 전", trendScore: 11, themeRank: 5, sectorRank: 5, riskTags: [], earlySignal: true },
-    { code: "035420", name: "NAVER", market: "KOSPI", sector: "소프트웨어", theme: "AI 서비스", changePct: 0.86, volumeRatio: 1.35, turnoverBn: 1140, foreignNetBn: 122, institutionNetBn: 45, programNetBn: 39, news: "AI 검색 서비스 개편", disclosure: "최근 공시 확인 전", trendScore: 9, themeRank: 6, sectorRank: 5, riskTags: ["추세 확인 필요"], earlySignal: true },
-    { code: "034020", name: "두산에너빌리티", market: "KOSPI", sector: "기계", theme: "원전·전력", changePct: -0.28, volumeRatio: 1.22, turnoverBn: 890, foreignNetBn: 66, institutionNetBn: 31, programNetBn: 9, news: "원전 수주 기대 보도", disclosure: "최근 공시 확인 전", trendScore: 7, themeRank: 7, sectorRank: 4, riskTags: ["가격 모멘텀 약함"], earlySignal: true },
+    createBaseStock({ code: "000660", name: "SK하이닉스", market: "KOSPI", sector: "반도체", theme: "AI 반도체", changePct: 5.42, volumeRatio: 2.4, turnoverBn: 12850, foreignNetBn: 1820, institutionNetBn: 690, programNetBn: 410, news: "HBM 공급 확대 기대", trendScore: 18, themeRank: 1, sectorRank: 1, riskTags: ["단기 급등"], earlySignal: false }),
+    createBaseStock({ code: "058470", name: "리노공업", market: "KOSDAQ", sector: "반도체", theme: "AI 반도체", changePct: 4.18, volumeRatio: 2.1, turnoverBn: 1420, foreignNetBn: 210, institutionNetBn: 130, programNetBn: 48, news: "AI 테스트 소켓 수요", trendScore: 17, themeRank: 1, sectorRank: 1, riskTags: [], earlySignal: false }),
+    createBaseStock({ code: "267260", name: "HD현대일렉트릭", market: "KOSPI", sector: "전기장비", theme: "전력기기", changePct: 3.72, volumeRatio: 1.9, turnoverBn: 3380, foreignNetBn: 95, institutionNetBn: 340, programNetBn: 62, news: "북미 전력망 투자 기대", trendScore: 18, themeRank: 2, sectorRank: 2, riskTags: [], earlySignal: false }),
+    createBaseStock({ code: "066970", name: "엘앤에프", market: "KOSPI", sector: "2차전지", theme: "2차전지 장비", changePct: 2.12, volumeRatio: 1.7, turnoverBn: 980, foreignNetBn: 74, institutionNetBn: 54, programNetBn: 18, news: "배터리 소재 업황 저점 기대", trendScore: 12, themeRank: 3, sectorRank: 4, riskTags: ["업황 변동성"], earlySignal: true }),
+    createBaseStock({ code: "196170", name: "알테오젠", market: "KOSDAQ", sector: "제약·바이오", theme: "바이오 임상", changePct: 3.05, volumeRatio: 1.8, turnoverBn: 2210, foreignNetBn: 160, institutionNetBn: -42, programNetBn: 30, news: "기술이전 기대감", trendScore: 15, themeRank: 4, sectorRank: 3, riskTags: ["이벤트 변동성"], earlySignal: true }),
+    createBaseStock({ code: "047810", name: "한국항공우주", market: "KOSPI", sector: "방산", theme: "방산", changePct: 1.62, volumeRatio: 1.5, turnoverBn: 760, foreignNetBn: -18, institutionNetBn: 88, programNetBn: 12, news: "수출 협상 보도", trendScore: 11, themeRank: 5, sectorRank: 5, riskTags: [], earlySignal: true }),
+    createBaseStock({ code: "035420", name: "NAVER", market: "KOSPI", sector: "소프트웨어", theme: "AI 서비스", changePct: 0.86, volumeRatio: 1.35, turnoverBn: 1140, foreignNetBn: 122, institutionNetBn: 45, programNetBn: 39, news: "AI 검색 서비스 개편", trendScore: 9, themeRank: 6, sectorRank: 5, riskTags: ["추세 확인 필요"], earlySignal: true }),
+    createBaseStock({ code: "034020", name: "두산에너빌리티", market: "KOSPI", sector: "기계", theme: "원전·전력", changePct: -0.28, volumeRatio: 1.22, turnoverBn: 890, foreignNetBn: 66, institutionNetBn: 31, programNetBn: 9, news: "원전 수주 기대 보도", trendScore: 7, themeRank: 7, sectorRank: 4, riskTags: ["가격 모멘텀 약함"], earlySignal: true }),
   ];
 
   const providers = [
@@ -312,7 +335,7 @@ function getBaseSnapshot(): MarketSnapshot {
       { label: "거래량 점수", max: 15, rule: "5일·20일 평균 대비 거래량 증가 배수" },
       { label: "거래대금 점수", max: 10, rule: "시장 관심을 확인할 수 있는 절대 거래대금" },
       { label: "뉴스 모멘텀", max: 10, rule: "긍정 뉴스, 정책, 수주, 실적 기대 키워드" },
-      { label: "공시 모멘텀", max: 10, rule: "수주, 계약, 실적, 임상, 자사주, M&A 공시" },
+      { label: "공시 모멘텀", max: 10, rule: "DART 공시 자동 분류: 계약, 실적, 주주환원, 자금조달, 지분, 리스크" },
       { label: "테마 강도", max: 10, rule: "테마 내 상대강도와 동반 상승 종목 수" },
       { label: "업종 강도", max: 10, rule: "업종 수익률과 업종 내 주도주 확산" },
       { label: "추세 점수", max: 15, rule: "단기·중기 추세, 신고가, 눌림 후 재상승" },
@@ -442,6 +465,9 @@ function toLiveStockSignal(item: NaverMarketStock): LiveStockSignal | undefined 
     programNetBn: null,
     news: "네이버 금융 실시간 시세 반영",
     disclosure: "최근 공시 확인 전",
+    disclosureCategory: "미분류",
+    disclosureTone: "neutral",
+    disclosureScore: 0,
     trendScore,
     themeRank: 99,
     sectorRank: 99,
@@ -940,9 +966,10 @@ async function fetchDartDisclosures(stockList: StockSignal[]) {
   const disclosures = body.list ?? [];
   const stockNames = new Set(stockList.map((stock) => stock.name));
   const matchedCount = disclosures.filter((item) => item.corp_name && stockNames.has(item.corp_name)).length;
+  const classifiedCount = disclosures.filter((item) => classifyDisclosure(item.report_nm ?? "").category !== "기타").length;
 
   return {
-    status: provider("disclosure", "공시", "connected", `DART 최근 14일 공시를 연결했습니다. 관심 종목 관련 ${matchedCount}건을 반영했습니다.`),
+    status: provider("disclosure", "공시", "connected", `DART 최근 14일 공시 ${disclosures.length}건을 연결했고 ${classifiedCount}건을 자동 분류했습니다. 기본 관심 종목 관련 ${matchedCount}건을 우선 확인했습니다.`),
     disclosures,
   };
 }
@@ -1029,25 +1056,63 @@ function applyDisclosures(snapshot: MarketSnapshot, disclosures: DartDisclosure[
   if (disclosures.length === 0) return snapshot;
 
   const disclosureByName = new Map<string, DartDisclosure>();
+  const disclosureByCode = new Map<string, DartDisclosure>();
 
   for (const disclosure of disclosures) {
     if (disclosure.corp_name && !disclosureByName.has(disclosure.corp_name)) {
       disclosureByName.set(disclosure.corp_name, disclosure);
+    }
+    if (disclosure.stock_code && !disclosureByCode.has(disclosure.stock_code)) {
+      disclosureByCode.set(disclosure.stock_code, disclosure);
     }
   }
 
   return {
     ...snapshot,
     stocks: snapshot.stocks.map((stock) => {
-      const hit = disclosureByName.get(stock.name);
+      const hit = disclosureByCode.get(stock.code) ?? disclosureByName.get(stock.name);
       if (!hit?.report_nm) return stock;
+      const classified = classifyDisclosure(hit.report_nm);
+      const riskTags = classified.tone === "watch"
+        ? Array.from(new Set([...stock.riskTags, classified.category]))
+        : stock.riskTags;
 
       return {
         ...stock,
-        disclosure: `${hit.report_nm}${hit.rcept_dt ? ` (${formatDisclosureDate(hit.rcept_dt)})` : ""}`,
+        disclosure: `${classified.summary}${hit.rcept_dt ? ` (${formatDisclosureDate(hit.rcept_dt)})` : ""}`,
+        disclosureCategory: classified.category,
+        disclosureTone: classified.tone,
+        disclosureScore: classified.score,
+        trendScore: Math.max(1, Math.min(20, stock.trendScore + Math.round(classified.score / 3))),
+        riskTags,
         earlySignal: true,
       };
     }),
+  };
+}
+
+function classifyDisclosure(reportName: string): ClassifiedDisclosure {
+  const normalized = reportName.replace(/\s+/g, "");
+  const rules: Array<{ category: string; tone: DisclosureTone; score: number; keywords: string[] }> = [
+    { category: "주의 공시", tone: "watch", score: -10, keywords: ["불성실공시", "상장폐지", "관리종목", "거래정지", "횡령", "배임", "투자경고", "조회공시요구"] },
+    { category: "자금조달", tone: "watch", score: -6, keywords: ["유상증자", "전환사채", "신주인수권", "교환사채", "사채권", "증권발행결과"] },
+    { category: "계약·수주", tone: "positive", score: 10, keywords: ["단일판매", "공급계약", "수주", "판매ㆍ공급계약", "판매·공급계약"] },
+    { category: "실적", tone: "positive", score: 8, keywords: ["잠정실적", "영업(잠정)실적", "매출액또는손익구조", "영업이익", "실적"] },
+    { category: "주주환원", tone: "positive", score: 8, keywords: ["자기주식취득", "자기주식처분", "주식소각", "현금ㆍ현물배당", "배당"] },
+    { category: "바이오·임상", tone: "positive", score: 8, keywords: ["임상", "품목허가", "기술이전", "특허권", "라이선스"] },
+    { category: "지분·M&A", tone: "neutral", score: 5, keywords: ["타법인주식", "회사합병", "회사분할", "주식등의대량보유", "임원ㆍ주요주주", "최대주주"] },
+    { category: "거버넌스", tone: "neutral", score: 3, keywords: ["주주총회", "대표이사", "이사회", "감사보고서"] },
+  ];
+  const hit = rules.find((rule) => rule.keywords.some((keyword) => normalized.includes(keyword.replace(/\s+/g, ""))));
+  const category = hit?.category ?? "기타";
+  const tone = hit?.tone ?? "neutral";
+  const score = hit?.score ?? 1;
+
+  return {
+    category,
+    tone,
+    score,
+    summary: `[${category}] ${reportName}`,
   };
 }
 
@@ -1202,7 +1267,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     const snapshot = await buildSnapshot();
     cachedSnapshot = {
-      expiresAt: Date.now() + 60_000,
+      expiresAt: Date.now() + 20_000,
       snapshot,
     };
 
