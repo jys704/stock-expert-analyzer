@@ -37,9 +37,9 @@ type StockSignal = {
   changePct: number;
   volumeRatio: number;
   turnoverBn: number;
-  foreignNetBn: number;
-  institutionNetBn: number;
-  programNetBn: number;
+  foreignNetBn: number | null;
+  institutionNetBn: number | null;
+  programNetBn: number | null;
   news: string;
   disclosure: string;
   trendScore: number;
@@ -166,6 +166,17 @@ type NaverMarketStock = {
   stockExchangeType?: {
     name?: Market;
   };
+};
+
+type NaverIntegrationResponse = {
+  dealTrendInfos?: NaverDealTrendInfo[];
+};
+
+type NaverDealTrendInfo = {
+  bizdate?: string;
+  foreignerPureBuyQuant?: string;
+  organPureBuyQuant?: string;
+  closePrice?: string;
 };
 
 const YAHOO_STOCK_SYMBOLS: Record<string, string> = {
@@ -297,7 +308,7 @@ function getBaseSnapshot(): MarketSnapshot {
     sectors,
     stocks,
     scoreModel: [
-      { label: "수급 점수", max: 20, rule: "외국인·기관 3일 순매수, 프로그램 순매수 우위" },
+      { label: "수급 점수", max: 20, rule: "외국인·기관 최근 순매수 우위, 프로그램은 공급자 제공 시 반영" },
       { label: "거래량 점수", max: 15, rule: "5일·20일 평균 대비 거래량 증가 배수" },
       { label: "거래대금 점수", max: 10, rule: "시장 관심을 확인할 수 있는 절대 거래대금" },
       { label: "뉴스 모멘텀", max: 10, rule: "긍정 뉴스, 정책, 수주, 실적 기대 키워드" },
@@ -346,10 +357,11 @@ async function fetchNaverMarket(baseStocks: StockSignal[]): Promise<YahooMarketD
     kosdaq.asOfTime,
     ...liveStocks.map((stock) => stock.regularMarketTime ?? 0),
   );
+  const supplyCount = liveStocks.filter((stock) => stock.foreignNetBn !== null || stock.institutionNetBn !== null).length;
 
   return {
     source: "naver",
-    status: provider("price", "시세", "connected", `네이버 금융 realtime 시세로 지수와 KOSPI/KOSDAQ ${liveStocks.length}개 종목의 등락률, 거래량, 거래대금을 갱신했습니다.`),
+    status: provider("price", "시세", "connected", `네이버 금융 realtime 시세로 지수와 KOSPI/KOSDAQ ${liveStocks.length}개 종목의 등락률, 거래량, 거래대금을 갱신했습니다. 상위 후보 ${supplyCount}개는 외국인·기관 순매수 수급도 반영했습니다.`),
     asOf: asOfTime > 0 ? new Date(asOfTime).toISOString() : new Date().toISOString(),
     indices: [
       { name: "KOSPI" as const, value: kospi.value, changePct: kospi.changePct },
@@ -372,7 +384,7 @@ async function fetchNaverStockUniverse(): Promise<LiveStockSignal[]> {
     throw new Error("Naver market list returned no stocks");
   }
 
-  return stocks;
+  return enrichNaverInvestorFlows(stocks);
 }
 
 async function fetchNaverMarketStocks(market: Market): Promise<NaverMarketStock[]> {
@@ -425,9 +437,9 @@ function toLiveStockSignal(item: NaverMarketStock): LiveStockSignal | undefined 
     changePct,
     volumeRatio,
     turnoverBn,
-    foreignNetBn: 0,
-    institutionNetBn: 0,
-    programNetBn: 0,
+    foreignNetBn: null,
+    institutionNetBn: null,
+    programNetBn: null,
     news: "네이버 금융 실시간 시세 반영",
     disclosure: "최근 공시 확인 전",
     trendScore,
@@ -436,6 +448,55 @@ function toLiveStockSignal(item: NaverMarketStock): LiveStockSignal | undefined 
     riskTags,
     earlySignal: changePct > 0 || volumeRatio >= 1.5,
     regularMarketTime,
+  };
+}
+
+async function enrichNaverInvestorFlows(stocks: LiveStockSignal[]): Promise<LiveStockSignal[]> {
+  const candidates = stocks
+    .slice()
+    .sort((a, b) => getSupplyFetchPriority(b) - getSupplyFetchPriority(a))
+    .slice(0, 160);
+  const pairs = await mapLimit(candidates, 8, async (stock) => {
+    const flow = await fetchNaverInvestorFlow(stock).catch(() => undefined);
+    return [stock.code, flow] as const;
+  });
+  const flowByCode = new Map(pairs.filter((pair) => pair[1]).map(([code, flow]) => [code, flow!]));
+
+  return stocks.map((stock) => {
+    const flow = flowByCode.get(stock.code);
+    if (!flow) return stock;
+
+    return {
+      ...stock,
+      foreignNetBn: flow.foreignNetBn,
+      institutionNetBn: flow.institutionNetBn,
+      earlySignal: stock.earlySignal || flow.foreignNetBn > 0 || flow.institutionNetBn > 0,
+    };
+  });
+}
+
+function getSupplyFetchPriority(stock: StockSignal) {
+  return stock.trendScore * 3
+    + Math.max(-10, Math.min(10, stock.changePct)) * 2
+    + Math.min(10, stock.volumeRatio) * 3
+    + Math.min(20, Math.log10(stock.turnoverBn + 10) * 4);
+}
+
+async function fetchNaverInvestorFlow(stock: StockSignal) {
+  const url = new URL(`https://m.stock.naver.com/api/stock/${stock.code}/integration`);
+  const body = await fetchNaverJson<NaverIntegrationResponse>(url, 4_000);
+  const latest = body.dealTrendInfos?.[0];
+  const closePrice = parseNaverNumber(latest?.closePrice);
+  const foreignQty = parseNaverNumber(latest?.foreignerPureBuyQuant);
+  const institutionQty = parseNaverNumber(latest?.organPureBuyQuant);
+
+  if (!latest || closePrice <= 0) {
+    throw new Error(`${stock.code} investor flow data is incomplete`);
+  }
+
+  return {
+    foreignNetBn: (foreignQty * closePrice) / 100_000_000,
+    institutionNetBn: (institutionQty * closePrice) / 100_000_000,
   };
 }
 

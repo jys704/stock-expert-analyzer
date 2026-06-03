@@ -55,9 +55,9 @@ type StockSignal = {
   changePct: number;
   volumeRatio: number;
   turnoverBn: number;
-  foreignNetBn: number;
-  institutionNetBn: number;
-  programNetBn: number;
+  foreignNetBn: number | null;
+  institutionNetBn: number | null;
+  programNetBn: number | null;
   news: string;
   disclosure: string;
   trendScore: number;
@@ -126,8 +126,27 @@ function signed(value: number, unit = "%") {
   return `${sign}${formatNumber(value, 2)}${unit}`;
 }
 
+function numeric(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function formatFlow(value: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `${value > 0 ? "+" : ""}${formatNumber(value)}억`;
+}
+
+function flowTone(value: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "border-b border-slate-100 px-3 py-3 text-right font-mono text-slate-400";
+  return value >= 0
+    ? "border-b border-slate-100 px-3 py-3 text-right font-mono text-red-600"
+    : "border-b border-slate-100 px-3 py-3 text-right font-mono text-blue-600";
+}
+
 function getScore(stock: StockSignal): ScoreBreakdown {
-  const supply = Math.min(20, Math.max(0, (stock.foreignNetBn > 0 ? 9 : 0) + (stock.institutionNetBn > 0 ? 9 : 0) + (stock.programNetBn > 0 ? 2 : 0)));
+  const foreignNetBn = numeric(stock.foreignNetBn);
+  const institutionNetBn = numeric(stock.institutionNetBn);
+  const programNetBn = numeric(stock.programNetBn);
+  const supply = Math.min(20, Math.max(0, (foreignNetBn > 0 ? 9 : 0) + (institutionNetBn > 0 ? 9 : 0) + (programNetBn > 0 ? 2 : 0)));
   const volume = stock.volumeRatio >= 2 ? 15 : stock.volumeRatio >= 1.7 ? 12 : stock.volumeRatio >= 1.4 ? 9 : stock.volumeRatio >= 1.15 ? 5 : 2;
   const turnover = stock.turnoverBn >= 3000 ? 10 : stock.turnoverBn >= 1000 ? 8 : stock.turnoverBn >= 500 ? 6 : 3;
   const news = stock.news.includes("특이") ? 3 : 10;
@@ -359,6 +378,7 @@ function MarketPhase({ themes, stocks }: { themes: StrengthItem[]; stocks: Stock
 
 function RecommendationCard({ stock, rank }: { stock: StockSignal; rank: number }) {
   const score = getScore(stock);
+  const hasProgram = typeof stock.programNetBn === "number" && Number.isFinite(stock.programNetBn);
 
   return (
     <Card className="rounded-md border-slate-200 bg-white shadow-none">
@@ -376,7 +396,7 @@ function RecommendationCard({ stock, rank }: { stock: StockSignal; rank: number 
       </CardHeader>
       <CardContent className="space-y-3 text-sm leading-6 text-slate-700">
         <p><span className="font-semibold text-slate-950">추천 사유</span> {stock.theme} 주도 테마 안에서 수급, 거래량, 추세 점수가 함께 높습니다.</p>
-        <p><span className="font-semibold text-slate-950">수급 포인트</span> 외국인 {formatNumber(stock.foreignNetBn)}억, 기관 {formatNumber(stock.institutionNetBn)}억, 프로그램 {formatNumber(stock.programNetBn)}억.</p>
+        <p><span className="font-semibold text-slate-950">수급 포인트</span> 외국인 {formatFlow(stock.foreignNetBn)}, 기관 {formatFlow(stock.institutionNetBn)}, 프로그램 {hasProgram ? formatFlow(stock.programNetBn) : "확인 불가"}.</p>
         <p><span className="font-semibold text-slate-950">거래 포인트</span> 거래량 {stock.volumeRatio.toFixed(1)}배, 거래대금 {formatNumber(stock.turnoverBn)}억.</p>
         <p><span className="font-semibold text-slate-950">뉴스·공시</span> {stock.news} · {stock.disclosure}</p>
         <p className="flex gap-2 text-amber-700">
@@ -432,7 +452,7 @@ export default function Home() {
     return rankedStocks
       .filter(({ stock }) => market === "전체" || stock.market === market)
       .filter(({ stock }) => theme === "전체" || stock.theme === theme)
-      .filter(({ stock }) => !jointBuying || (stock.foreignNetBn > 0 && stock.institutionNetBn > 0))
+      .filter(({ stock }) => !jointBuying || (numeric(stock.foreignNetBn) > 0 && numeric(stock.institutionNetBn) > 0))
       .filter(({ stock }) => !volumeSpike || stock.volumeRatio >= 1.5)
       .filter(({ stock }) => !issueIncluded || !stock.news.includes("특이") || !stock.disclosure.includes("특이"))
       .filter(({ stock }) => {
@@ -615,8 +635,8 @@ export default function Home() {
                           {signed(stock.changePct)}
                         </td>
                         <td className="border-b border-slate-100 px-3 py-3 text-right font-mono">{stock.volumeRatio.toFixed(1)}x</td>
-                        <td className={stock.foreignNetBn >= 0 ? "border-b border-slate-100 px-3 py-3 text-right font-mono text-red-600" : "border-b border-slate-100 px-3 py-3 text-right font-mono text-blue-600"}>{formatNumber(stock.foreignNetBn)}억</td>
-                        <td className={stock.institutionNetBn >= 0 ? "border-b border-slate-100 px-3 py-3 text-right font-mono text-red-600" : "border-b border-slate-100 px-3 py-3 text-right font-mono text-blue-600"}>{formatNumber(stock.institutionNetBn)}억</td>
+                        <td className={flowTone(stock.foreignNetBn)}>{formatFlow(stock.foreignNetBn)}</td>
+                        <td className={flowTone(stock.institutionNetBn)}>{formatFlow(stock.institutionNetBn)}</td>
                         <td className="border-b border-slate-100 px-3 py-3 text-right">
                           <div className="ml-auto flex w-28 items-center justify-end gap-2">
                             <Progress value={score.total} className="h-2 w-14" />
@@ -680,7 +700,7 @@ export default function Home() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm leading-6 text-slate-700">
-              <p>시장 요약, 강세 종목 리스트, 핵심 필터, 현재/다음 장세 구분, 추천 3선, 리스크 고지.</p>
+              <p>시장 요약, 강세 종목 리스트, 핵심 필터, 현재/다음 장세 구분, 추천 10선, 리스크 고지.</p>
               <p>처음 버전은 빠르게 판단하는 대시보드에 집중합니다.</p>
             </CardContent>
           </Card>
