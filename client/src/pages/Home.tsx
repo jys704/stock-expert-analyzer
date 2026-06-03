@@ -19,6 +19,7 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  Star,
   Sparkles,
   TrendingUp,
 } from "lucide-react";
@@ -125,7 +126,16 @@ type ScoreBreakdown = {
   total: number;
 };
 
+type RiskAlert = {
+  stock: StockSignal;
+  severity: "critical" | "high" | "watch";
+  score: number;
+  reasons: string[];
+  watched: boolean;
+};
+
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
+const WATCHLIST_STORAGE_KEY = "stock-expert-analyzer.watchlist.v1";
 
 function formatNumber(value: number, digits = 0) {
   return new Intl.NumberFormat("ko-KR", { maximumFractionDigits: digits }).format(value);
@@ -183,8 +193,31 @@ function scoreTone(score: number) {
   return "보수";
 }
 
+function riskSeverityClass(severity: RiskAlert["severity"]) {
+  if (severity === "critical") return "rounded-md border-red-200 bg-red-50 text-red-700";
+  if (severity === "high") return "rounded-md border-amber-200 bg-amber-50 text-amber-700";
+  return "rounded-md border-slate-200 bg-white text-slate-600";
+}
+
+function riskSeverityLabel(severity: RiskAlert["severity"]) {
+  if (severity === "critical") return "긴급";
+  if (severity === "high") return "주의";
+  return "관찰";
+}
+
 function unique(values: string[]) {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b, "ko"));
+}
+
+function readSavedWatchlist() {
+  if (typeof window === "undefined") return [];
+
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(WATCHLIST_STORAGE_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 function getVisiblePages(currentPage: number, totalPages: number) {
@@ -192,6 +225,62 @@ function getVisiblePages(currentPage: number, totalPages: number) {
   const end = Math.min(totalPages, start + 4);
 
   return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+}
+
+function buildRiskAlerts(stocks: StockSignal[], watchlist: Set<string>): RiskAlert[] {
+  return stocks
+    .map((stock) => {
+      const reasons: string[] = [];
+      let score = 0;
+      const foreignNetBn = numeric(stock.foreignNetBn);
+      const institutionNetBn = numeric(stock.institutionNetBn);
+
+      if (stock.disclosureTone === "watch") {
+        score += 36;
+        reasons.push(`${stock.disclosureCategory} 공시`);
+      }
+      if (stock.changePct <= -7) {
+        score += 34;
+        reasons.push(`급락 ${signed(stock.changePct)}`);
+      } else if (stock.changePct <= -4) {
+        score += 22;
+        reasons.push(`약세 ${signed(stock.changePct)}`);
+      }
+      if (stock.changePct >= 8) {
+        score += 22;
+        reasons.push(`단기 과열 ${signed(stock.changePct)}`);
+      }
+      if (stock.volumeRatio >= 5) {
+        score += 18;
+        reasons.push(`거래 집중 ${stock.volumeRatio.toFixed(1)}x`);
+      }
+      if (foreignNetBn < 0 && institutionNetBn < 0) {
+        score += 16;
+        reasons.push("외국인·기관 동반 매도");
+      }
+      if (stock.riskTags.length) {
+        score += Math.min(18, stock.riskTags.length * 6);
+        reasons.push(...stock.riskTags.slice(0, 2));
+      }
+
+      if (watchlist.has(stock.code)) score += 12;
+
+      const severity: RiskAlert["severity"] = score >= 55 ? "critical" : score >= 32 ? "high" : "watch";
+
+      return {
+        stock,
+        severity,
+        score,
+        reasons: Array.from(new Set(reasons)).slice(0, 3),
+        watched: watchlist.has(stock.code),
+      };
+    })
+    .filter((alert) => alert.score >= 24 && alert.reasons.length > 0)
+    .sort((a, b) => {
+      if (a.watched !== b.watched) return a.watched ? -1 : 1;
+      return b.score - a.score;
+    })
+    .slice(0, 10);
 }
 
 function formatNewsTime(value: string) {
@@ -276,6 +365,61 @@ function BreakingNewsPanel({ items }: { items: BreakingNewsItem[] }) {
           </div>
         ) : (
           <p className="text-sm leading-6 text-slate-500">네이버 뉴스 API 키가 연결되면 최신 증시 뉴스가 자동으로 표시됩니다.</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RiskAlertPanel({ alerts, watchlistCount }: { alerts: RiskAlert[]; watchlistCount: number }) {
+  return (
+    <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
+      <CardHeader className="flex flex-row items-center justify-between pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <ShieldAlert className="h-5 w-5 text-amber-600" />
+          고급 리스크 경보
+        </CardTitle>
+        <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">관심 {watchlistCount}개</Badge>
+      </CardHeader>
+      <CardContent>
+        {alerts.length ? (
+          <div className="grid gap-3 lg:grid-cols-2">
+            {alerts.map((alert) => (
+              <div key={alert.stock.code} className="rounded-md border border-slate-100 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium text-slate-950">{alert.stock.name}</p>
+                      {alert.watched ? <Star className="h-4 w-4 fill-amber-400 text-amber-500" /> : null}
+                    </div>
+                    <p className="mt-1 font-mono text-xs text-slate-400">{alert.stock.code} · {alert.stock.market}</p>
+                  </div>
+                  <Badge variant="outline" className={riskSeverityClass(alert.severity)}>{riskSeverityLabel(alert.severity)}</Badge>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {alert.reasons.map((reason) => (
+                    <Badge key={reason} variant="outline" className="rounded-md border-slate-200 bg-slate-50 text-slate-600">{reason}</Badge>
+                  ))}
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                  <div>
+                    <p className="text-slate-400">등락률</p>
+                    <p className={alert.stock.changePct >= 0 ? "mt-1 font-mono font-semibold text-red-600" : "mt-1 font-mono font-semibold text-blue-600"}>{signed(alert.stock.changePct)}</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-400">거래량</p>
+                    <p className="mt-1 font-mono font-semibold text-slate-800">{alert.stock.volumeRatio.toFixed(1)}x</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-400">위험점수</p>
+                    <p className="mt-1 font-mono font-semibold text-slate-800">{alert.score}</p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm leading-6 text-slate-500">현재 조건에서 강한 리스크 경보가 없습니다. 관심종목을 저장하면 해당 종목을 우선 감시합니다.</p>
         )}
       </CardContent>
     </Card>
@@ -399,7 +543,17 @@ function MarketPhase({ themes, stocks }: { themes: StrengthItem[]; stocks: Stock
   );
 }
 
-function RecommendationCard({ stock, rank }: { stock: StockSignal; rank: number }) {
+function RecommendationCard({
+  stock,
+  rank,
+  watched,
+  onToggleWatch,
+}: {
+  stock: StockSignal;
+  rank: number;
+  watched: boolean;
+  onToggleWatch: (code: string) => void;
+}) {
   const score = getScore(stock);
   const hasProgram = typeof stock.programNetBn === "number" && Number.isFinite(stock.programNetBn);
 
@@ -411,9 +565,21 @@ function RecommendationCard({ stock, rank }: { stock: StockSignal; rank: number 
             <p className="font-mono text-xs text-slate-400">추천 {rank} · {stock.code}</p>
             <CardTitle className="mt-1 text-xl tracking-[-0.02em] text-slate-950">{stock.name}</CardTitle>
           </div>
-          <div className="text-right">
-            <p className="font-mono text-3xl font-semibold text-slate-950">{score.total}</p>
-            <Badge className="rounded-md bg-slate-950 text-white hover:bg-slate-950">{scoreTone(score.total)}</Badge>
+          <div className="flex items-start gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-8 w-8 rounded-md"
+              onClick={() => onToggleWatch(stock.code)}
+              aria-label={watched ? "관심종목 해제" : "관심종목 저장"}
+            >
+              <Star className={watched ? "h-4 w-4 fill-amber-400 text-amber-500" : "h-4 w-4 text-slate-400"} />
+            </Button>
+            <div className="text-right">
+              <p className="font-mono text-3xl font-semibold text-slate-950">{score.total}</p>
+              <Badge className="rounded-md bg-slate-950 text-white hover:bg-slate-950">{scoreTone(score.total)}</Badge>
+            </div>
           </div>
         </div>
       </CardHeader>
@@ -454,9 +620,11 @@ export default function Home() {
   const [jointBuying, setJointBuying] = useState(false);
   const [volumeSpike, setVolumeSpike] = useState(false);
   const [issueIncluded, setIssueIncluded] = useState(false);
+  const [watchlistOnly, setWatchlistOnly] = useState(false);
   const [query, setQuery] = useState("");
   const [pageSize, setPageSize] = useState(50);
   const [currentPage, setCurrentPage] = useState(1);
+  const [watchlist, setWatchlist] = useState<string[]>(readSavedWatchlist);
 
   const snapshot = snapshotQuery.data;
   const marketIndices = snapshot?.indices ?? [];
@@ -481,6 +649,17 @@ export default function Home() {
     forceRefreshRef.current = true;
     void snapshotQuery.refetch();
   };
+  const watchlistSet = useMemo(() => new Set(watchlist), [watchlist]);
+  const toggleWatchlist = (code: string) => {
+    setWatchlist((current) => {
+      if (current.includes(code)) return current.filter((item) => item !== code);
+      return [...current, code];
+    });
+  };
+
+  useEffect(() => {
+    window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(watchlist));
+  }, [watchlist]);
 
   const themeOptions = useMemo(() => ["전체", ...unique(stocks.map((stock) => stock.theme))], [stocks]);
   const rankedStocks = useMemo(
@@ -488,9 +667,18 @@ export default function Home() {
     [stocks],
   );
   const recommendations = rankedStocks.slice(0, 10).map((item) => item.stock);
+  const watchlistStocks = useMemo(
+    () => stocks.filter((stock) => watchlistSet.has(stock.code)),
+    [stocks, watchlistSet],
+  );
+  const riskAlerts = useMemo(
+    () => buildRiskAlerts(stocks, watchlistSet),
+    [stocks, watchlistSet],
+  );
 
   const filteredStocks = useMemo(() => {
     return rankedStocks
+      .filter(({ stock }) => !watchlistOnly || watchlistSet.has(stock.code))
       .filter(({ stock }) => market === "전체" || stock.market === market)
       .filter(({ stock }) => theme === "전체" || stock.theme === theme)
       .filter(({ stock }) => !jointBuying || (numeric(stock.foreignNetBn) > 0 && numeric(stock.institutionNetBn) > 0))
@@ -501,7 +689,7 @@ export default function Home() {
         if (!keyword) return true;
         return `${stock.name} ${stock.code} ${stock.sector} ${stock.theme}`.toLowerCase().includes(keyword);
       });
-  }, [issueIncluded, jointBuying, market, query, rankedStocks, theme, volumeSpike]);
+  }, [issueIncluded, jointBuying, market, query, rankedStocks, theme, volumeSpike, watchlistOnly, watchlistSet]);
   const totalPages = Math.max(1, Math.ceil(filteredStocks.length / pageSize));
   const safePage = Math.min(currentPage, totalPages);
   const pageStart = filteredStocks.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
@@ -511,7 +699,7 @@ export default function Home() {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [issueIncluded, jointBuying, market, pageSize, query, theme, volumeSpike]);
+  }, [issueIncluded, jointBuying, market, pageSize, query, theme, volumeSpike, watchlistOnly]);
 
   return (
     <main className="min-h-screen w-screen max-w-full overflow-x-hidden bg-slate-50 text-slate-950">
@@ -600,6 +788,39 @@ export default function Home() {
           ))}
         </section>
 
+        <section className="grid min-w-0 gap-4 lg:grid-cols-[320px_1fr]">
+          <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Star className="h-5 w-5 text-amber-500" />
+                내 관심종목
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {watchlistStocks.length ? (
+                <div className="space-y-2">
+                  {watchlistStocks.slice(0, 6).map((stock) => (
+                    <div key={stock.code} className="flex items-center justify-between gap-3 rounded-md border border-slate-100 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-slate-950">{stock.name}</p>
+                        <p className="font-mono text-xs text-slate-400">{stock.code}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className={stock.changePct >= 0 ? "font-mono text-sm font-semibold text-red-600" : "font-mono text-sm font-semibold text-blue-600"}>{signed(stock.changePct)}</p>
+                        <Button type="button" variant="ghost" className="h-6 px-2 text-[11px] text-slate-500" onClick={() => toggleWatchlist(stock.code)}>해제</Button>
+                      </div>
+                    </div>
+                  ))}
+                  {watchlistStocks.length > 6 ? <p className="text-xs text-slate-500">외 {watchlistStocks.length - 6}개는 관심종목 필터에서 확인할 수 있습니다.</p> : null}
+                </div>
+              ) : (
+                <p className="text-sm leading-6 text-slate-500">종목 리스트나 추천 카드의 별표를 누르면 이 브라우저에 사용자별 관심종목으로 저장됩니다.</p>
+              )}
+            </CardContent>
+          </Card>
+          <RiskAlertPanel alerts={riskAlerts} watchlistCount={watchlist.length} />
+        </section>
+
         <section className="grid min-w-0 gap-4 lg:grid-cols-[280px_1fr]">
           <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
             <CardHeader className="pb-3">
@@ -642,6 +863,10 @@ export default function Home() {
               <Separator />
 
               <label className="flex items-start gap-3 text-sm leading-6 text-slate-700">
+                <Checkbox checked={watchlistOnly} onCheckedChange={(checked) => setWatchlistOnly(Boolean(checked))} />
+                관심종목만 보기
+              </label>
+              <label className="flex items-start gap-3 text-sm leading-6 text-slate-700">
                 <Checkbox checked={jointBuying} onCheckedChange={(checked) => setJointBuying(Boolean(checked))} />
                 외인·기관 동시 순매수
               </label>
@@ -683,9 +908,10 @@ export default function Home() {
             </CardHeader>
             <CardContent>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[1040px] border-separate border-spacing-0 text-left text-sm">
+                <table className="w-full min-w-[1080px] border-separate border-spacing-0 text-left text-sm">
                   <thead>
                     <tr className="border-b border-slate-200 text-xs text-slate-500">
+                      <th className="border-b border-slate-200 px-3 py-2 font-medium">관심</th>
                       <th className="border-b border-slate-200 px-3 py-2 font-medium">종목명</th>
                       <th className="border-b border-slate-200 px-3 py-2 font-medium">시장</th>
                       <th className="border-b border-slate-200 px-3 py-2 font-medium">업종·테마</th>
@@ -700,13 +926,25 @@ export default function Home() {
                   <tbody>
                     {pagedStocks.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="px-3 py-10 text-center text-sm text-slate-500">
+                        <td colSpan={10} className="px-3 py-10 text-center text-sm text-slate-500">
                           조건에 맞는 종목이 없습니다. 검색어 또는 필터를 조정해 주세요.
                         </td>
                       </tr>
                     ) : null}
                     {pagedStocks.map(({ stock, score }) => (
                       <tr key={stock.code} className="border-b border-slate-100">
+                        <td className="border-b border-slate-100 px-3 py-3">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 rounded-md"
+                            onClick={() => toggleWatchlist(stock.code)}
+                            aria-label={watchlistSet.has(stock.code) ? "관심종목 해제" : "관심종목 저장"}
+                          >
+                            <Star className={watchlistSet.has(stock.code) ? "h-4 w-4 fill-amber-400 text-amber-500" : "h-4 w-4 text-slate-300"} />
+                          </Button>
+                        </td>
                         <td className="border-b border-slate-100 px-3 py-3">
                           <p className="font-medium text-slate-950">{stock.name}</p>
                           <p className="font-mono text-xs text-slate-400">{stock.code}</p>
@@ -839,7 +1077,15 @@ export default function Home() {
             </div>
           </div>
           <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-            {recommendations.map((stock, index) => <RecommendationCard key={stock.code} stock={stock} rank={index + 1} />)}
+            {recommendations.map((stock, index) => (
+              <RecommendationCard
+                key={stock.code}
+                stock={stock}
+                rank={index + 1}
+                watched={watchlistSet.has(stock.code)}
+                onToggleWatch={toggleWatchlist}
+              />
+            ))}
           </div>
         </section>
 
@@ -864,7 +1110,7 @@ export default function Home() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm leading-6 text-slate-700">
-              <p>뉴스 감성 분석, 알림, 포트폴리오 추적, 사용자별 관심종목 저장, 고급 리스크 경보.</p>
+              <p>뉴스 감성 분석, 알림, 포트폴리오 추적, 로그인 계정 간 관심종목 동기화.</p>
               <p>복잡한 백테스트와 고급 차트는 MVP 이후에 붙이는 편이 좋습니다.</p>
             </CardContent>
           </Card>
