@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -6,6 +6,10 @@ import {
   BarChart3,
   Bell,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   CircleDollarSign,
   Factory,
   Filter,
@@ -117,6 +121,8 @@ type ScoreBreakdown = {
   total: number;
 };
 
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
 function formatNumber(value: number, digits = 0) {
   return new Intl.NumberFormat("ko-KR", { maximumFractionDigits: digits }).format(value);
 }
@@ -169,6 +175,13 @@ function scoreTone(score: number) {
 
 function unique(values: string[]) {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b, "ko"));
+}
+
+function getVisiblePages(currentPage: number, totalPages: number) {
+  const start = Math.max(1, Math.min(currentPage - 2, totalPages - 4));
+  const end = Math.min(totalPages, start + 4);
+
+  return Array.from({ length: end - start + 1 }, (_, index) => start + index);
 }
 
 function formatNewsTime(value: string) {
@@ -420,6 +433,8 @@ export default function Home() {
   const [volumeSpike, setVolumeSpike] = useState(false);
   const [issueIncluded, setIssueIncluded] = useState(false);
   const [query, setQuery] = useState("");
+  const [pageSize, setPageSize] = useState(50);
+  const [currentPage, setCurrentPage] = useState(1);
 
   const snapshot = snapshotQuery.data;
   const marketIndices = snapshot?.indices ?? [];
@@ -461,6 +476,16 @@ export default function Home() {
         return `${stock.name} ${stock.code} ${stock.sector} ${stock.theme}`.toLowerCase().includes(keyword);
       });
   }, [issueIncluded, jointBuying, market, query, rankedStocks, theme, volumeSpike]);
+  const totalPages = Math.max(1, Math.ceil(filteredStocks.length / pageSize));
+  const safePage = Math.min(currentPage, totalPages);
+  const pageStart = filteredStocks.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const pageEnd = Math.min(safePage * pageSize, filteredStocks.length);
+  const pagedStocks = filteredStocks.slice(pageStart > 0 ? pageStart - 1 : 0, pageEnd);
+  const visiblePages = getVisiblePages(safePage, totalPages);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [issueIncluded, jointBuying, market, pageSize, query, theme, volumeSpike]);
 
   return (
     <main className="min-h-screen w-screen max-w-full overflow-x-hidden bg-slate-50 text-slate-950">
@@ -595,12 +620,29 @@ export default function Home() {
           </Card>
 
           <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
-            <CardHeader className="flex flex-row items-center justify-between pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <BarChart3 className="h-5 w-5 text-slate-600" />
-                현재 강세 종목 리스트
-              </CardTitle>
-              <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">{filteredStocks.length}/{stocks.length}개</Badge>
+            <CardHeader className="gap-3 pb-3">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <BarChart3 className="h-5 w-5 text-slate-600" />
+                    현재 강세 종목 리스트
+                  </CardTitle>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {filteredStocks.length ? `${formatNumber(pageStart)}-${formatNumber(pageEnd)}번째 표시` : "표시할 종목 없음"}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">{formatNumber(filteredStocks.length)}/{formatNumber(stocks.length)}개</Badge>
+                  <select
+                    value={pageSize}
+                    onChange={(event) => setPageSize(Number(event.target.value))}
+                    className="h-9 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-900 outline-none focus:border-slate-400"
+                    aria-label="페이지당 표시 종목 수"
+                  >
+                    {PAGE_SIZE_OPTIONS.map((option) => <option key={option} value={option}>{option}개씩</option>)}
+                  </select>
+                </div>
+              </div>
             </CardHeader>
             <CardContent>
               <div className="overflow-x-auto">
@@ -618,7 +660,14 @@ export default function Home() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredStocks.map(({ stock, score }) => (
+                    {pagedStocks.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="px-3 py-10 text-center text-sm text-slate-500">
+                          조건에 맞는 종목이 없습니다. 검색어 또는 필터를 조정해 주세요.
+                        </td>
+                      </tr>
+                    ) : null}
+                    {pagedStocks.map(({ stock, score }) => (
                       <tr key={stock.code} className="border-b border-slate-100">
                         <td className="border-b border-slate-100 px-3 py-3">
                           <p className="font-medium text-slate-950">{stock.name}</p>
@@ -647,6 +696,68 @@ export default function Home() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+              <div className="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-4 md:flex-row md:items-center md:justify-between">
+                <p className="text-xs text-slate-500">
+                  총 {formatNumber(totalPages)}페이지 중 {formatNumber(safePage)}페이지
+                </p>
+                <div className="flex flex-wrap items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-8 w-8 rounded-md"
+                    onClick={() => setCurrentPage(1)}
+                    disabled={safePage <= 1}
+                    aria-label="첫 페이지"
+                  >
+                    <ChevronsLeft className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-8 w-8 rounded-md"
+                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                    disabled={safePage <= 1}
+                    aria-label="이전 페이지"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
+                  {visiblePages.map((page) => (
+                    <Button
+                      key={page}
+                      type="button"
+                      variant={safePage === page ? "default" : "outline"}
+                      className="h-8 min-w-8 rounded-md px-2 text-xs"
+                      onClick={() => setCurrentPage(page)}
+                    >
+                      {formatNumber(page)}
+                    </Button>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-8 w-8 rounded-md"
+                    onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                    disabled={safePage >= totalPages}
+                    aria-label="다음 페이지"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-8 w-8 rounded-md"
+                    onClick={() => setCurrentPage(totalPages)}
+                    disabled={safePage >= totalPages}
+                    aria-label="마지막 페이지"
+                  >
+                    <ChevronsRight className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             </CardContent>
           </Card>
