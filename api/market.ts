@@ -11,6 +11,27 @@ type ProviderStatus = {
   requiredEnv?: string[];
 };
 
+type ProviderDiagnostic = ProviderStatus & {
+  checkedAt: string;
+  latencyMs: number;
+  recordCount: number;
+  lastSuccessAt?: string;
+  stale: boolean;
+  error?: string;
+};
+
+type DataQuality = {
+  status: "healthy" | "degraded" | "fallback";
+  score: number;
+  checkedAt: string;
+  generatedAt: string;
+  cacheHit: boolean;
+  cacheTtlSec: number;
+  dataAgeMinutes: number;
+  warnings: string[];
+  diagnostics: ProviderDiagnostic[];
+};
+
 type DisclosureTone = "positive" | "watch" | "neutral";
 
 type MarketIndex = {
@@ -70,6 +91,7 @@ type MarketSnapshot = {
   asOf: string;
   source: "sample" | "yahoo" | "naver";
   sourceDetail: string;
+  dataQuality: DataQuality;
   providers: ProviderStatus[];
   breakingNews: BreakingNewsItem[];
   marketSummary: string;
@@ -153,6 +175,16 @@ type YahooIndexData = {
   regularMarketTime?: number;
 };
 
+type TimedResult<T> = {
+  status: "fulfilled";
+  value: T;
+  latencyMs: number;
+} | {
+  status: "rejected";
+  reason: string;
+  latencyMs: number;
+};
+
 type NaverRealtimeResponse = {
   resultCode?: string;
   result?: {
@@ -231,6 +263,141 @@ function provider(
   return { id, label, state, detail, requiredEnv };
 }
 
+async function measureProvider<T>(task: () => Promise<T>): Promise<TimedResult<T>> {
+  const startedAt = Date.now();
+  try {
+    const value = await task();
+    return {
+      status: "fulfilled",
+      value,
+      latencyMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    return {
+      status: "rejected",
+      reason: error instanceof Error ? error.message : "Unknown provider error",
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+}
+
+function buildDataQuality({
+  snapshot,
+  startedAt,
+  marketResult,
+  disclosureResult,
+  newsResult,
+  breakingNewsResult,
+  globalIndexResult,
+}: {
+  snapshot: MarketSnapshot;
+  startedAt: string;
+  marketResult: TimedResult<YahooMarketData>;
+  disclosureResult: TimedResult<{ status: ProviderStatus; disclosures: DartDisclosure[] }>;
+  newsResult: TimedResult<{ status: ProviderStatus; newsByStock: Map<string, NaverNewsItem[]> }>;
+  breakingNewsResult: TimedResult<BreakingNewsItem[]>;
+  globalIndexResult: TimedResult<GlobalIndex[]>;
+}): DataQuality {
+  const checkedAt = new Date().toISOString();
+  const dataAgeMinutes = Math.max(0, Math.round((Date.now() - new Date(snapshot.asOf).getTime()) / 60_000));
+  const warnings: string[] = [];
+  const providerById = new Map(snapshot.providers.map((item) => [item.id, item]));
+  const newestNews = snapshot.breakingNews[0]?.publishedAt;
+  const hasTodayNews = snapshot.breakingNews.some((item) => isTodayNewsDate(item.publishedAt));
+  const priceProvider = providerById.get("price") ?? provider("price", "시세", "error", "시세 공급자 상태를 확인하지 못했습니다.");
+  const disclosureProvider = providerById.get("disclosure") ?? provider("disclosure", "공시", "error", "공시 공급자 상태를 확인하지 못했습니다.");
+  const newsProvider = providerById.get("news") ?? provider("news", "뉴스", "error", "뉴스 공급자 상태를 확인하지 못했습니다.");
+
+  for (const providerStatus of snapshot.providers) {
+    if (providerStatus.state !== "connected") {
+      warnings.push(`${providerStatus.label} 공급자 상태: ${providerStatus.state}`);
+    }
+  }
+  if (dataAgeMinutes > 30) warnings.push(`시세 기준 시간이 ${dataAgeMinutes}분 경과했습니다.`);
+  if (!hasTodayNews) warnings.push("오늘 날짜 뉴스·공시가 아직 충분하지 않아 최근 2일 자료를 함께 표시합니다.");
+  if (globalIndexResult.status === "rejected") warnings.push(`해외 지수 조회 실패: ${globalIndexResult.reason}`);
+
+  const diagnostics: ProviderDiagnostic[] = [
+    {
+      ...priceProvider,
+      checkedAt,
+      latencyMs: marketResult.latencyMs,
+      recordCount: snapshot.stocks.length + snapshot.indices.length + snapshot.globalIndices.length,
+      lastSuccessAt: priceProvider.state === "connected" ? snapshot.asOf : undefined,
+      stale: priceProvider.state !== "connected" || dataAgeMinutes > 30,
+      error: marketResult.status === "rejected" ? marketResult.reason : undefined,
+    },
+    {
+      ...disclosureProvider,
+      checkedAt,
+      latencyMs: disclosureResult.latencyMs,
+      recordCount: disclosureResult.status === "fulfilled" ? disclosureResult.value.disclosures.length : 0,
+      lastSuccessAt: disclosureProvider.state === "connected" ? checkedAt : undefined,
+      stale: disclosureProvider.state !== "connected",
+      error: disclosureResult.status === "rejected" ? disclosureResult.reason : undefined,
+    },
+    {
+      ...newsProvider,
+      checkedAt,
+      latencyMs: Math.max(newsResult.latencyMs, breakingNewsResult.latencyMs),
+      recordCount: snapshot.breakingNews.length + (newsResult.status === "fulfilled" ? Array.from(newsResult.value.newsByStock.values()).filter((items) => items.length > 0).length : 0),
+      lastSuccessAt: newsProvider.state === "connected" ? newestNews ?? checkedAt : undefined,
+      stale: newsProvider.state !== "connected" || !hasTodayNews,
+      error: newsResult.status === "rejected" ? newsResult.reason : breakingNewsResult.status === "rejected" ? breakingNewsResult.reason : undefined,
+    },
+  ];
+
+  const score = Math.max(0, Math.min(100,
+    snapshot.providers.reduce((sum, item) => {
+      if (item.state === "connected") return sum + 28;
+      if (item.state === "fallback") return sum + 14;
+      if (item.state === "missing_key") return sum + 8;
+      return sum;
+    }, 0)
+    + (hasTodayNews ? 8 : 0)
+    + (snapshot.globalIndices.length >= 4 ? 8 : 0)
+    - (dataAgeMinutes > 30 ? 12 : 0),
+  ));
+  const status: DataQuality["status"] = priceProvider.state !== "connected" || snapshot.source === "sample"
+    ? "fallback"
+    : warnings.length || score < 80
+      ? "degraded"
+      : "healthy";
+
+  return {
+    status,
+    score,
+    checkedAt,
+    generatedAt: startedAt,
+    cacheHit: false,
+    cacheTtlSec: 20,
+    dataAgeMinutes,
+    warnings: Array.from(new Set(warnings)).slice(0, 6),
+    diagnostics,
+  };
+}
+
+function buildBaseDataQuality(providers: ProviderStatus[]): DataQuality {
+  const now = new Date().toISOString();
+  return {
+    status: "fallback",
+    score: 36,
+    checkedAt: now,
+    generatedAt: now,
+    cacheHit: false,
+    cacheTtlSec: 20,
+    dataAgeMinutes: 0,
+    warnings: ["외부 공급자 연결 전 기본 데이터를 표시합니다."],
+    diagnostics: providers.map((item) => ({
+      ...item,
+      checkedAt: now,
+      latencyMs: 0,
+      recordCount: 0,
+      stale: item.state !== "connected",
+    })),
+  };
+}
+
 function createBaseStock(stock: Omit<StockSignal, "disclosure" | "disclosureCategory" | "disclosureTone" | "disclosureScore">): StockSignal {
   return {
     ...stock,
@@ -243,12 +410,13 @@ function createBaseStock(stock: Omit<StockSignal, "disclosure" | "disclosureCate
 
 async function buildSnapshot(): Promise<MarketSnapshot> {
   const base = getBaseSnapshot();
-  const [marketResult, disclosureResult, newsResult, breakingNewsResult, globalIndexResult] = await Promise.allSettled([
-    fetchNaverMarket(base.stocks).catch(() => fetchYahooMarket(base.stocks)),
-    fetchDartDisclosures(base.stocks),
-    fetchNaverNews(base.stocks),
-    fetchBreakingNews(),
-    fetchGlobalIndices(),
+  const startedAt = new Date().toISOString();
+  const [marketResult, disclosureResult, newsResult, breakingNewsResult, globalIndexResult] = await Promise.all([
+    measureProvider(() => fetchNaverMarket(base.stocks).catch(() => fetchYahooMarket(base.stocks))),
+    measureProvider(() => fetchDartDisclosures(base.stocks)),
+    measureProvider(() => fetchNaverNews(base.stocks)),
+    measureProvider(() => fetchBreakingNews()),
+    measureProvider(() => fetchGlobalIndices()),
   ]);
 
   let snapshot = base;
@@ -304,6 +472,15 @@ async function buildSnapshot(): Promise<MarketSnapshot> {
   return {
     ...snapshot,
     sourceDetail: snapshot.providers.map((item) => `${item.label}: ${item.detail}`).join(" "),
+    dataQuality: buildDataQuality({
+      snapshot,
+      startedAt,
+      marketResult,
+      disclosureResult,
+      newsResult,
+      breakingNewsResult,
+      globalIndexResult,
+    }),
   };
 }
 
@@ -358,6 +535,7 @@ function getBaseSnapshot(): MarketSnapshot {
     asOf: new Date().toISOString(),
     source: "sample",
     sourceDetail: providers.map((item) => `${item.label}: ${item.detail}`).join(" "),
+    dataQuality: buildBaseDataQuality(providers),
     providers,
     breakingNews: [],
     marketSummary: "코스닥 강도가 우세하고 AI 반도체·전력기기에 수급과 거래대금이 집중됩니다.",
@@ -1053,32 +1231,39 @@ async function fetchNaverNews(stockList: StockSignal[]) {
     };
   }
 
-  const pairs = await Promise.all(stockList.map(async (stock) => {
+  let failedCount = 0;
+  const pairs = await mapLimit(stockList, 4, async (stock) => {
     const url = new URL("https://openapi.naver.com/v1/search/news.json");
     url.searchParams.set("query", `${stock.name}`);
     url.searchParams.set("display", "3");
     url.searchParams.set("sort", "date");
 
-    const body = await fetchJson<{ items?: NaverNewsItem[] }>(url, 4_000, {
-      headers: {
-        "X-Naver-Client-Id": clientId,
-        "X-Naver-Client-Secret": clientSecret,
-      },
-    });
+    try {
+      const body = await fetchJson<{ items?: NaverNewsItem[] }>(url, 4_000, {
+        headers: {
+          "X-Naver-Client-Id": clientId,
+          "X-Naver-Client-Secret": clientSecret,
+        },
+      });
 
-    const relevantItems = (body.items ?? [])
-      .filter((item) => isRelevantNews(stock, item))
-      .filter((item) => isFreshNewsDate(item.pubDate, 7))
-      .slice(0, 3);
+      const relevantItems = (body.items ?? [])
+        .filter((item) => isRelevantNews(stock, item))
+        .filter((item) => isFreshNewsDate(item.pubDate, 7))
+        .slice(0, 3);
 
-    return [stock.code, relevantItems] as const;
-  }));
+      return [stock.code, relevantItems] as const;
+    } catch {
+      failedCount += 1;
+      return [stock.code, [] as NaverNewsItem[]] as const;
+    }
+  });
 
   const newsByStock = new Map(pairs);
   const matchedCount = Array.from(newsByStock.values()).filter((items) => items.length > 0).length;
+  const partial = failedCount > 0 ? ` 종목별 뉴스 ${failedCount}건은 일시 실패해 속보 뉴스 중심으로 표시합니다.` : "";
 
   return {
-    status: provider("news", "뉴스", "connected", `네이버 뉴스 검색 API를 연결했습니다. 관심 종목 ${matchedCount}개에 최신 뉴스가 반영됐습니다.`),
+    status: provider("news", "뉴스", "connected", `네이버 뉴스 검색 API를 연결했습니다. 관심 종목 ${matchedCount}개에 최신 뉴스가 반영됐습니다.${partial}`),
     newsByStock,
   };
 }
@@ -1399,16 +1584,26 @@ function wantsRefresh(req: IncomingMessage) {
   return url.searchParams.get("refresh") === "1";
 }
 
+function withCacheHit(snapshot: MarketSnapshot, cacheHit: boolean): MarketSnapshot {
+  return {
+    ...snapshot,
+    dataQuality: {
+      ...snapshot.dataQuality,
+      cacheHit,
+    },
+  };
+}
+
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   try {
     if (!wantsRefresh(req) && cachedSnapshot && cachedSnapshot.expiresAt > Date.now()) {
       res.setHeader("Content-Type", "application/json; charset=utf-8");
       res.statusCode = 200;
-      res.end(JSON.stringify(cachedSnapshot.snapshot));
+      res.end(JSON.stringify(withCacheHit(cachedSnapshot.snapshot, true)));
       return;
     }
 
-    const snapshot = await buildSnapshot();
+    const snapshot = withCacheHit(await buildSnapshot(), false);
     cachedSnapshot = {
       expiresAt: Date.now() + 20_000,
       snapshot,
@@ -1419,9 +1614,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     res.end(JSON.stringify(snapshot));
   } catch {
     const snapshot = getBaseSnapshot();
+    const providers = snapshot.providers.map((item) => item.id === "price" ? item : { ...item, state: "error" as const, detail: `${item.label} API 호출 중 오류가 발생해 기본 데이터를 표시합니다.` });
     const fallback = {
       ...snapshot,
-      providers: snapshot.providers.map((item) => item.id === "price" ? item : { ...item, state: "error" as const, detail: `${item.label} API 호출 중 오류가 발생해 기본 데이터를 표시합니다.` }),
+      providers,
+      dataQuality: {
+        ...buildBaseDataQuality(providers),
+        status: "fallback" as const,
+        score: 20,
+        warnings: ["외부 API 호출 중 오류가 발생해 기본 데이터를 표시합니다."],
+      },
       sourceDetail: "외부 API 호출 중 오류가 발생해 기본 데이터를 표시합니다.",
     };
 

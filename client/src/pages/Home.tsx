@@ -92,6 +92,27 @@ type ProviderStatus = {
   requiredEnv?: string[];
 };
 
+type ProviderDiagnostic = ProviderStatus & {
+  checkedAt: string;
+  latencyMs: number;
+  recordCount: number;
+  lastSuccessAt?: string;
+  stale: boolean;
+  error?: string;
+};
+
+type DataQuality = {
+  status: "healthy" | "degraded" | "fallback";
+  score: number;
+  checkedAt: string;
+  generatedAt: string;
+  cacheHit: boolean;
+  cacheTtlSec: number;
+  dataAgeMinutes: number;
+  warnings: string[];
+  diagnostics: ProviderDiagnostic[];
+};
+
 type BreakingNewsItem = {
   title: string;
   summary: string;
@@ -104,6 +125,7 @@ type MarketSnapshot = {
   asOf: string;
   source: "sample" | "yahoo" | "naver";
   sourceDetail: string;
+  dataQuality: DataQuality;
   providers: ProviderStatus[];
   breakingNews: BreakingNewsItem[];
   marketSummary: string;
@@ -213,6 +235,31 @@ function providerStatusClass(provider: ProviderStatus) {
   if (provider.state === "missing_key") return "rounded-md border-amber-200 bg-amber-50 text-amber-700";
   if (provider.state === "error") return "rounded-md border-red-200 bg-red-50 text-red-700";
   return "rounded-md border-slate-200 bg-white text-slate-500";
+}
+
+function dataQualityLabel(status: DataQuality["status"]) {
+  if (status === "healthy") return "정상";
+  if (status === "degraded") return "주의";
+  return "폴백";
+}
+
+function dataQualityClass(status: DataQuality["status"]) {
+  if (status === "healthy") return "rounded-md border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (status === "degraded") return "rounded-md border-amber-200 bg-amber-50 text-amber-700";
+  return "rounded-md border-red-200 bg-red-50 text-red-700";
+}
+
+function formatDateTime(value: string | undefined) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+
+  return date.toLocaleString("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function riskSeverityClass(severity: RiskAlert["severity"]) {
@@ -461,6 +508,82 @@ function MarketBoard({
         </div>
         <Separator />
         <p className="text-xs leading-6 text-slate-500">{summary}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DataReliabilityPanel({ quality }: { quality?: DataQuality }) {
+  if (!quality) {
+    return (
+      <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
+        <CardContent className="p-4 text-sm text-slate-500">데이터 신뢰도 정보를 불러오는 중입니다.</CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
+      <CardHeader className="gap-3 pb-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <ShieldAlert className="h-5 w-5 text-slate-600" />
+            데이터 신뢰도 센터
+          </CardTitle>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className={dataQualityClass(quality.status)}>{dataQualityLabel(quality.status)}</Badge>
+            <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">{quality.cacheHit ? "캐시 응답" : "신규 조회"}</Badge>
+            <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">점검 {formatDateTime(quality.checkedAt)}</Badge>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 lg:grid-cols-[220px_1fr]">
+          <div className="rounded-md border border-slate-100 bg-slate-50 p-4">
+            <p className="text-xs font-medium text-slate-500">품질 점수</p>
+            <p className="mt-2 font-mono text-4xl font-semibold text-slate-950">{quality.score}</p>
+            <Progress value={quality.score} className="mt-3 h-2" />
+            <p className="mt-2 text-xs leading-5 text-slate-500">시세 기준 {quality.dataAgeMinutes}분 경과 · 캐시 TTL {quality.cacheTtlSec}초</p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            {quality.diagnostics.map((item) => (
+              <div key={item.id} className="rounded-md border border-slate-100 p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="font-medium text-slate-950">{item.label}</p>
+                    <p className="mt-1 text-xs text-slate-400">마지막 성공 {formatDateTime(item.lastSuccessAt)}</p>
+                  </div>
+                  <Badge variant="outline" className={providerStatusClass(item)}>{item.stale ? "점검" : providerStatusLabel(item)}</Badge>
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <p className="text-slate-400">응답시간</p>
+                    <p className="mt-1 font-mono font-semibold text-slate-800">{formatNumber(item.latencyMs)}ms</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-400">레코드</p>
+                    <p className="mt-1 font-mono font-semibold text-slate-800">{formatNumber(item.recordCount)}</p>
+                  </div>
+                </div>
+                <p className="mt-3 line-clamp-2 text-xs leading-5 text-slate-500">{item.error ?? item.detail}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        {quality.warnings.length ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+            <div className="flex gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+              <div className="space-y-1">
+                {quality.warnings.map((warning) => (
+                  <p key={warning} className="text-sm leading-6 text-amber-900">{warning}</p>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <p className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">현재 핵심 데이터 공급자 상태가 안정적입니다.</p>
+        )}
       </CardContent>
     </Card>
   );
@@ -730,6 +853,7 @@ export default function Home() {
   const marketSummary = snapshot?.marketSummary ?? "시장 데이터를 불러오는 중입니다.";
   const briefing = snapshot?.briefing ?? "시장 데이터를 불러오는 중입니다.";
   const sourceDetail = snapshot?.sourceDetail ?? "시장 데이터를 불러오는 중입니다.";
+  const dataQuality = snapshot?.dataQuality;
   const providers = snapshot?.providers ?? [];
   const breakingNews = snapshot?.breakingNews ?? [];
   const dataTime = snapshot?.asOf
@@ -859,6 +983,8 @@ export default function Home() {
         </section>
 
         <BreakingNewsPanel items={breakingNews} providers={providers} />
+
+        <DataReliabilityPanel quality={dataQuality} />
 
         <section className="grid min-w-0 gap-4 lg:grid-cols-[320px_1fr]">
           <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
