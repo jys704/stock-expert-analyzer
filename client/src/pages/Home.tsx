@@ -10,9 +10,9 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
-  CircleDollarSign,
   Factory,
   Filter,
+  Globe2,
   KeyRound,
   LineChart,
   Newspaper,
@@ -42,6 +42,14 @@ type MarketIndex = {
   turnoverTn: number;
   advancers: number;
   decliners: number;
+};
+
+type GlobalIndex = {
+  name: string;
+  region: string;
+  value: number;
+  changePct: number;
+  source: string;
 };
 
 type StrengthItem = {
@@ -84,12 +92,6 @@ type ProviderStatus = {
   requiredEnv?: string[];
 };
 
-type ScoreModelItem = {
-  label: string;
-  max: number;
-  rule: string;
-};
-
 type BreakingNewsItem = {
   title: string;
   summary: string;
@@ -107,10 +109,11 @@ type MarketSnapshot = {
   marketSummary: string;
   briefing: string;
   indices: MarketIndex[];
+  globalIndices: GlobalIndex[];
   themes: StrengthItem[];
   sectors: StrengthItem[];
   stocks: StockSignal[];
-  scoreModel: ScoreModelItem[];
+  scoreModel?: Array<{ label: string; max: number; rule: string }>;
 };
 
 type ScoreBreakdown = {
@@ -148,6 +151,11 @@ function signed(value: number, unit = "%") {
 
 function numeric(value: number | null | undefined) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function averageNumber(values: number[]) {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function formatFlow(value: number | null) {
@@ -191,6 +199,20 @@ function scoreTone(score: number) {
   if (score >= 70) return "관심";
   if (score >= 58) return "관찰";
   return "보수";
+}
+
+function providerStatusLabel(provider: ProviderStatus) {
+  if (provider.state === "connected") return `${provider.label} 연결`;
+  if (provider.state === "missing_key") return `${provider.label} 키 필요`;
+  if (provider.state === "error") return `${provider.label} 오류`;
+  return `${provider.label} 대기`;
+}
+
+function providerStatusClass(provider: ProviderStatus) {
+  if (provider.state === "connected") return "rounded-md border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (provider.state === "missing_key") return "rounded-md border-amber-200 bg-amber-50 text-amber-700";
+  if (provider.state === "error") return "rounded-md border-red-200 bg-red-50 text-red-700";
+  return "rounded-md border-slate-200 bg-white text-slate-500";
 }
 
 function riskSeverityClass(severity: RiskAlert["severity"]) {
@@ -333,15 +355,25 @@ function RankList({ title, items }: { title: string; items: StrengthItem[] }) {
   );
 }
 
-function BreakingNewsPanel({ items }: { items: BreakingNewsItem[] }) {
+function BreakingNewsPanel({ items, providers }: { items: BreakingNewsItem[]; providers: ProviderStatus[] }) {
   return (
     <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
-      <CardHeader className="flex flex-row items-center justify-between pb-3">
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Newspaper className="h-5 w-5 text-slate-600" />
-          실시간 뉴스·속보
-        </CardTitle>
-        <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">{items.length ? "NAVER 최신순" : "대기 중"}</Badge>
+      <CardHeader className="gap-3 pb-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Newspaper className="h-5 w-5 text-slate-600" />
+            실시간 뉴스·속보
+          </CardTitle>
+          <div className="flex flex-wrap items-center gap-2">
+            {providers.map((provider) => (
+              <Badge key={provider.id} variant="outline" className={providerStatusClass(provider)}>
+                {provider.state === "missing_key" ? <KeyRound className="mr-1 h-3 w-3" /> : <CheckCircle2 className="mr-1 h-3 w-3" />}
+                {providerStatusLabel(provider)}
+              </Badge>
+            ))}
+            <Badge variant="outline" className="rounded-md border-slate-200 text-slate-500">{items.length ? "오늘/최근 우선" : "대기 중"}</Badge>
+          </div>
+        </div>
       </CardHeader>
       <CardContent>
         {items.length ? (
@@ -366,6 +398,69 @@ function BreakingNewsPanel({ items }: { items: BreakingNewsItem[] }) {
         ) : (
           <p className="text-sm leading-6 text-slate-500">네이버 뉴스 API 키가 연결되면 최신 증시 뉴스가 자동으로 표시됩니다.</p>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function MarketBoard({
+  domestic,
+  global,
+  themes,
+  summary,
+}: {
+  domestic: MarketIndex[];
+  global: GlobalIndex[];
+  themes: StrengthItem[];
+  summary: string;
+}) {
+  const kospi = domestic.find((index) => index.name === "KOSPI");
+  const kosdaq = domestic.find((index) => index.name === "KOSDAQ");
+  const overseasTone = global.length ? averageNumber(global.map((index) => index.changePct)) : 0;
+  const leadingTheme = themes[0]?.name ?? "확인 중";
+
+  return (
+    <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Globe2 className="h-5 w-5 text-slate-600" />
+          시장 게시판
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="rounded-md border border-slate-100 bg-slate-50 p-3">
+          <p className="text-xs font-medium text-slate-500">국내 흐름</p>
+          <p className="mt-2 text-sm leading-6 text-slate-800">
+            KOSPI {kospi ? signed(kospi.changePct) : "확인 중"}, KOSDAQ {kosdaq ? signed(kosdaq.changePct) : "확인 중"}.
+            주도 테마는 {leadingTheme}입니다.
+          </p>
+        </div>
+        <div className="rounded-md border border-slate-100 bg-slate-50 p-3">
+          <p className="text-xs font-medium text-slate-500">해외 흐름</p>
+          <p className={overseasTone >= 0 ? "mt-2 font-mono text-lg font-semibold text-red-600" : "mt-2 font-mono text-lg font-semibold text-blue-600"}>
+            {signed(overseasTone)}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-slate-500">미국·일본·중국 주요 지수 평균 등락률 기준</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-slate-500">주요 해외 지수</p>
+          <div className="mt-2 space-y-2">
+            {global.slice(0, 6).map((index) => (
+              <div key={`${index.region}-${index.name}`} className="flex items-center justify-between gap-3 text-sm">
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-slate-800">{index.name}</p>
+                  <p className="text-xs text-slate-400">{index.region}</p>
+                </div>
+                <div className="text-right">
+                  <p className={index.changePct >= 0 ? "font-mono font-semibold text-red-600" : "font-mono font-semibold text-blue-600"}>{signed(index.changePct)}</p>
+                  <p className="font-mono text-[11px] text-slate-400">{index.value ? formatNumber(index.value, 2) : "대기"}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <Separator />
+        <p className="text-xs leading-6 text-slate-500">{summary}</p>
       </CardContent>
     </Card>
   );
@@ -628,10 +723,10 @@ export default function Home() {
 
   const snapshot = snapshotQuery.data;
   const marketIndices = snapshot?.indices ?? [];
+  const globalIndices = snapshot?.globalIndices ?? [];
   const themes = snapshot?.themes ?? [];
   const sectors = snapshot?.sectors ?? [];
   const stocks: StockSignal[] = snapshot?.stocks ?? [];
-  const scoreModel = snapshot?.scoreModel ?? [];
   const marketSummary = snapshot?.marketSummary ?? "시장 데이터를 불러오는 중입니다.";
   const briefing = snapshot?.briefing ?? "시장 데이터를 불러오는 중입니다.";
   const sourceDetail = snapshot?.sourceDetail ?? "시장 데이터를 불러오는 중입니다.";
@@ -704,10 +799,10 @@ export default function Home() {
   return (
     <main className="min-h-screen w-screen max-w-full overflow-x-hidden bg-slate-50 text-slate-950">
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-5 md:px-6 lg:flex-row lg:items-center lg:justify-between">
+        <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-5 px-4 py-5 md:px-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
             <h1 className="text-2xl font-semibold tracking-[-0.04em] sm:text-3xl md:text-4xl">한국 주식 강세장 분석</h1>
-            <p className="mt-2 max-w-[calc(100vw-2rem)] break-words text-sm leading-6 text-slate-500 md:max-w-none">코스피·코스닥의 테마, 업종, 수급, 거래량, 뉴스·공시를 100점 강세 점수로 정리합니다.</p>
+            <p className="mt-2 max-w-[calc(100vw-2rem)] break-words text-sm leading-6 text-slate-500 md:max-w-none">국내·해외 지수, 테마, 업종, 수급, 거래량, 뉴스·공시를 실시간 대시보드로 정리합니다.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline" className="h-8 rounded-md border-slate-200 bg-white text-slate-600">데이터 기준 {dataTime}</Badge>
@@ -730,63 +825,40 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="mx-auto grid w-full max-w-7xl gap-6 px-4 py-6 md:px-6">
+      <div className="mx-auto grid w-full max-w-[1600px] gap-6 px-4 py-6 md:px-6">
         {snapshotQuery.isError ? (
           <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">
             시장 데이터를 불러오지 못했습니다. 서버 상태를 확인한 뒤 다시 시도해 주세요.
           </div>
         ) : null}
 
-        <section className="grid min-w-0 items-start gap-4 lg:grid-cols-[1fr_360px]">
-          <div className="grid min-w-0 items-start gap-4 md:grid-cols-2">
-            {marketIndices.map((index) => <IndexPanel key={index.name} index={index} />)}
+        <section className="grid min-w-0 items-start gap-4 xl:grid-cols-[320px_1fr]">
+          <MarketBoard domestic={marketIndices} global={globalIndices} themes={themes} summary={marketSummary} />
+          <div className="grid min-w-0 gap-4">
+            <div className="grid min-w-0 items-start gap-4 lg:grid-cols-[1fr_360px]">
+              <div className="grid min-w-0 items-start gap-4 md:grid-cols-2">
+                {marketIndices.map((index) => <IndexPanel key={index.name} index={index} />)}
+              </div>
+              <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
+                <CardHeader className="pb-3">
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <LineChart className="h-5 w-5 text-slate-600" />
+                    오늘 시장 한줄 해석
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="break-words text-sm leading-7 text-slate-700">{marketSummary}</p>
+                </CardContent>
+              </Card>
+            </div>
+            <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+              <RankList title="오늘 강한 테마" items={themes} />
+              <RankList title="오늘 강한 업종" items={sectors} />
+            </div>
           </div>
-          <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <LineChart className="h-5 w-5 text-slate-600" />
-                오늘 시장 한줄 해석
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="break-words text-sm leading-7 text-slate-700">{marketSummary}</p>
-            </CardContent>
-          </Card>
         </section>
 
-        <section className="grid min-w-0 gap-4 lg:grid-cols-2">
-          <RankList title="오늘 강한 테마" items={themes} />
-          <RankList title="오늘 강한 업종" items={sectors} />
-        </section>
-
-        <BreakingNewsPanel items={breakingNews} />
-
-        <section className="grid gap-3 md:grid-cols-3">
-          {providers.map((provider) => (
-            <Card key={provider.id} className="rounded-md border-slate-200 bg-white shadow-none">
-              <CardContent className="flex gap-3 p-4">
-                <div className={provider.state === "connected" ? "mt-0.5 text-emerald-600" : provider.state === "missing_key" ? "mt-0.5 text-amber-600" : "mt-0.5 text-slate-500"}>
-                  {provider.state === "missing_key" ? <KeyRound className="h-5 w-5" /> : <CheckCircle2 className="h-5 w-5" />}
-                </div>
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="font-medium text-slate-950">{provider.label}</p>
-                    <Badge
-                      variant="outline"
-                      className={provider.state === "connected" ? "rounded-md border-emerald-200 bg-emerald-50 text-emerald-700" : provider.state === "missing_key" ? "rounded-md border-amber-200 bg-amber-50 text-amber-700" : "rounded-md border-slate-200 text-slate-500"}
-                    >
-                      {provider.state === "connected" ? "연결됨" : provider.state === "missing_key" ? "키 필요" : provider.state === "fallback" ? "폴백" : "오류"}
-                    </Badge>
-                  </div>
-                  <p className="mt-1 text-xs leading-5 text-slate-500">{provider.detail}</p>
-                  {provider.requiredEnv?.length ? (
-                    <p className="mt-2 font-mono text-[11px] leading-5 text-slate-500">{provider.requiredEnv.join(" / ")}</p>
-                  ) : null}
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </section>
+        <BreakingNewsPanel items={breakingNews} providers={providers} />
 
         <section className="grid min-w-0 gap-4 lg:grid-cols-[320px_1fr]">
           <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
@@ -821,7 +893,7 @@ export default function Home() {
           <RiskAlertPanel alerts={riskAlerts} watchlistCount={watchlist.length} />
         </section>
 
-        <section className="grid min-w-0 gap-4 lg:grid-cols-[280px_1fr]">
+        <section className="grid min-w-0 gap-4 xl:grid-cols-[260px_1fr]">
           <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
@@ -908,7 +980,7 @@ export default function Home() {
             </CardHeader>
             <CardContent>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[1080px] border-separate border-spacing-0 text-left text-sm">
+                <table className="w-full min-w-[1240px] border-separate border-spacing-0 text-left text-sm">
                   <thead>
                     <tr className="border-b border-slate-200 text-xs text-slate-500">
                       <th className="border-b border-slate-200 px-3 py-2 font-medium">관심</th>
@@ -1042,27 +1114,8 @@ export default function Home() {
           </Card>
         </section>
 
-        <section className="grid min-w-0 gap-4 lg:grid-cols-[1fr_360px]">
+        <section className="grid min-w-0 gap-4">
           <MarketPhase themes={themes} stocks={stocks} />
-          <Card className="w-full min-w-0 rounded-md border-slate-200 bg-white shadow-none">
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <CircleDollarSign className="h-5 w-5 text-slate-600" />
-                100점 강세 점수 모델
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {scoreModel.map((item) => (
-                  <div key={item.label} className="grid grid-cols-[88px_44px_1fr] gap-3 text-xs leading-5">
-                    <span className="font-medium text-slate-900">{item.label}</span>
-                    <span className={item.max < 0 ? "font-mono text-blue-600" : "font-mono text-slate-500"}>{item.max > 0 ? `+${item.max}` : item.max}</span>
-                    <span className="text-slate-500">{item.rule}</span>
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
         </section>
 
         <section>
@@ -1094,37 +1147,59 @@ export default function Home() {
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-                MVP에 꼭 필요한 기능
+                공개 전 안정화
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm leading-6 text-slate-700">
-              <p>시장 요약, 강세 종목 리스트, 핵심 필터, 현재/다음 장세 구분, 추천 10선, 리스크 고지.</p>
-              <p>처음 버전은 빠르게 판단하는 대시보드에 집중합니다.</p>
+              <p>시세·공시·뉴스 공급자 상태, 최신성, 장애 시 폴백 안내를 명확히 표시합니다.</p>
+              <p>실시간 참고 사이트로 공개하려면 데이터 출처와 지연 가능성을 항상 보여주는 것이 중요합니다.</p>
             </CardContent>
           </Card>
           <Card className="rounded-md border-slate-200 bg-white shadow-none">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Factory className="h-5 w-5 text-slate-600" />
-                나중에 확장할 기능
+                다음 개발 단계
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm leading-6 text-slate-700">
-              <p>뉴스 감성 분석, 알림, 포트폴리오 추적, 로그인 계정 간 관심종목 동기화.</p>
-              <p>복잡한 백테스트와 고급 차트는 MVP 이후에 붙이는 편이 좋습니다.</p>
+              <p>회원별 관심종목 동기화, 알림, 포트폴리오 추적, 공시 중요도 자동 분류를 순서대로 붙입니다.</p>
+              <p>차트·백테스트는 데이터 안정화 후 붙이는 것이 운영 리스크가 낮습니다.</p>
             </CardContent>
           </Card>
           <Card className="rounded-md border-slate-200 bg-slate-950 text-white shadow-none">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Newspaper className="h-5 w-5 text-slate-300" />
-                AI 자동 브리핑 예시
+                AI 자동 브리핑
               </CardTitle>
             </CardHeader>
             <CardContent className="text-sm leading-7 text-slate-300">
               {briefing}
             </CardContent>
           </Card>
+        </section>
+
+        <section className="rounded-md border border-slate-200 bg-white p-5">
+          <div className="grid gap-5 lg:grid-cols-[280px_1fr]">
+            <div>
+              <p className="text-sm font-semibold text-slate-950">서비스화 Plan</p>
+              <p className="mt-2 text-sm leading-6 text-slate-500">사람들이 참고할 수 있는 공개 사이트로 키우기 위한 다음 순서입니다.</p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              {[
+                ["1단계", "데이터 신뢰도", "시세·공시·뉴스 수집 로그와 장애 안내를 관리자 화면에서 확인"],
+                ["2단계", "사용자 기능", "로그인, 관심종목 동기화, 리스크 알림, 개인 대시보드"],
+                ["3단계", "콘텐츠화", "장마감 브리핑, 주간 리포트, 공시 요약, 교육형 가이드"],
+              ].map(([step, title, body]) => (
+                <div key={step} className="rounded-md border border-slate-100 bg-slate-50 p-4">
+                  <p className="font-mono text-xs text-slate-400">{step}</p>
+                  <p className="mt-1 font-semibold text-slate-950">{title}</p>
+                  <p className="mt-2 text-sm leading-6 text-slate-600">{body}</p>
+                </div>
+              ))}
+            </div>
+          </div>
         </section>
 
         <footer className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">

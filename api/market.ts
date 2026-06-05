@@ -22,6 +22,14 @@ type MarketIndex = {
   decliners: number;
 };
 
+type GlobalIndex = {
+  name: string;
+  region: string;
+  value: number;
+  changePct: number;
+  source: string;
+};
+
 type StrengthItem = {
   name: string;
   changePct: number;
@@ -67,6 +75,7 @@ type MarketSnapshot = {
   marketSummary: string;
   briefing: string;
   indices: MarketIndex[];
+  globalIndices: GlobalIndex[];
   themes: StrengthItem[];
   sectors: StrengthItem[];
   stocks: StockSignal[];
@@ -83,6 +92,7 @@ type DartDisclosure = {
   stock_code?: string;
   report_nm?: string;
   rcept_dt?: string;
+  rcept_no?: string;
 };
 
 type ClassifiedDisclosure = {
@@ -135,6 +145,12 @@ type YahooMarketData = {
   asOf: string;
   indices: Array<Pick<MarketIndex, "name" | "value" | "changePct">>;
   stocks: StockSignal[];
+};
+
+type YahooIndexData = {
+  value: number;
+  changePct: number;
+  regularMarketTime?: number;
 };
 
 type NaverRealtimeResponse = {
@@ -227,11 +243,12 @@ function createBaseStock(stock: Omit<StockSignal, "disclosure" | "disclosureCate
 
 async function buildSnapshot(): Promise<MarketSnapshot> {
   const base = getBaseSnapshot();
-  const [marketResult, disclosureResult, newsResult, breakingNewsResult] = await Promise.allSettled([
+  const [marketResult, disclosureResult, newsResult, breakingNewsResult, globalIndexResult] = await Promise.allSettled([
     fetchNaverMarket(base.stocks).catch(() => fetchYahooMarket(base.stocks)),
     fetchDartDisclosures(base.stocks),
     fetchNaverNews(base.stocks),
     fetchBreakingNews(),
+    fetchGlobalIndices(),
   ]);
 
   let snapshot = base;
@@ -249,6 +266,10 @@ async function buildSnapshot(): Promise<MarketSnapshot> {
   if (disclosureResult.status === "fulfilled") {
     snapshot = applyDisclosures(snapshot, disclosureResult.value.disclosures);
     snapshot = upsertProvider(snapshot, disclosureResult.value.status);
+    snapshot = {
+      ...snapshot,
+      breakingNews: mergeBreakingNews(snapshot.breakingNews, disclosuresToBreakingNews(disclosureResult.value.disclosures)),
+    };
   } else {
     snapshot = upsertProvider(
       snapshot,
@@ -269,7 +290,14 @@ async function buildSnapshot(): Promise<MarketSnapshot> {
   if (breakingNewsResult.status === "fulfilled") {
     snapshot = {
       ...snapshot,
-      breakingNews: breakingNewsResult.value,
+      breakingNews: mergeBreakingNews(snapshot.breakingNews, breakingNewsResult.value),
+    };
+  }
+
+  if (globalIndexResult.status === "fulfilled") {
+    snapshot = {
+      ...snapshot,
+      globalIndices: globalIndexResult.value,
     };
   }
 
@@ -283,6 +311,14 @@ function getBaseSnapshot(): MarketSnapshot {
   const indices = [
     { name: "KOSPI" as const, value: 2792.41, changePct: 0.82, turnoverTn: 9.8, advancers: 512, decliners: 358 },
     { name: "KOSDAQ" as const, value: 874.26, changePct: 1.47, turnoverTn: 7.1, advancers: 827, decliners: 514 },
+  ];
+  const globalIndices: GlobalIndex[] = [
+    { name: "S&P 500", region: "미국", value: 0, changePct: 0, source: "Yahoo Finance" },
+    { name: "NASDAQ", region: "미국", value: 0, changePct: 0, source: "Yahoo Finance" },
+    { name: "DOW", region: "미국", value: 0, changePct: 0, source: "Yahoo Finance" },
+    { name: "NIKKEI 225", region: "일본", value: 0, changePct: 0, source: "Yahoo Finance" },
+    { name: "Shanghai", region: "중국", value: 0, changePct: 0, source: "Yahoo Finance" },
+    { name: "Hang Seng", region: "홍콩", value: 0, changePct: 0, source: "Yahoo Finance" },
   ];
 
   const themes = [
@@ -327,6 +363,7 @@ function getBaseSnapshot(): MarketSnapshot {
     marketSummary: "코스닥 강도가 우세하고 AI 반도체·전력기기에 수급과 거래대금이 집중됩니다.",
     briefing: "오늘 시장은 코스닥 강도가 코스피보다 우세하며, AI 반도체와 전력기기에 수급과 거래대금이 집중됩니다. 뉴스와 공시는 외부 API로 보강하며, 단기 급등 종목은 분할 접근과 손절 기준을 먼저 정해야 합니다.",
     indices,
+    globalIndices,
     themes,
     sectors,
     stocks,
@@ -610,7 +647,38 @@ function signedNaverRate(item?: NaverRealtimeData) {
   return Math.abs(item.cr) * sign;
 }
 
-async function fetchYahooIndex(name: Market, symbol: string) {
+async function fetchGlobalIndices(): Promise<GlobalIndex[]> {
+  const symbols = [
+    { name: "S&P 500", region: "미국", symbol: "^GSPC" },
+    { name: "NASDAQ", region: "미국", symbol: "^IXIC" },
+    { name: "DOW", region: "미국", symbol: "^DJI" },
+    { name: "NIKKEI 225", region: "일본", symbol: "^N225" },
+    { name: "Shanghai", region: "중국", symbol: "000001.SS" },
+    { name: "Hang Seng", region: "홍콩", symbol: "^HSI" },
+  ];
+
+  const results = await Promise.allSettled(
+    symbols.map(async (item) => {
+      const index = await fetchYahooIndex(item.name, item.symbol);
+      return {
+        name: item.name,
+        region: item.region,
+        value: index.value,
+        changePct: index.changePct,
+        source: "Yahoo Finance",
+      };
+    }),
+  );
+
+  const indices = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  if (indices.length === 0) {
+    throw new Error("Global Yahoo index data is unavailable");
+  }
+
+  return indices;
+}
+
+async function fetchYahooIndex(name: string, symbol: string): Promise<YahooIndexData> {
   const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
   url.searchParams.set("range", "1d");
   url.searchParams.set("interval", "1m");
@@ -1000,6 +1068,7 @@ async function fetchNaverNews(stockList: StockSignal[]) {
 
     const relevantItems = (body.items ?? [])
       .filter((item) => isRelevantNews(stock, item))
+      .filter((item) => isFreshNewsDate(item.pubDate, 7))
       .slice(0, 3);
 
     return [stock.code, relevantItems] as const;
@@ -1022,19 +1091,30 @@ async function fetchBreakingNews(): Promise<BreakingNewsItem[]> {
     return [];
   }
 
-  const url = new URL("https://openapi.naver.com/v1/search/news.json");
-  url.searchParams.set("query", "증시 코스피 코스닥 특징주 주식");
-  url.searchParams.set("display", "20");
-  url.searchParams.set("sort", "date");
+  const queries = [
+    "오늘 증시 코스피 코스닥 특징주",
+    "오늘 국내증시 외국인 기관 순매수",
+    "오늘 공시 특징주 주식",
+    "오늘 미국증시 환율 반도체",
+  ];
+  const bodies = await Promise.allSettled(queries.map((query) => {
+    const url = new URL("https://openapi.naver.com/v1/search/news.json");
+    url.searchParams.set("query", query);
+    url.searchParams.set("display", "15");
+    url.searchParams.set("sort", "date");
 
-  const body = await fetchJson<{ items?: NaverNewsItem[] }>(url, 4_000, {
-    headers: {
-      "X-Naver-Client-Id": clientId,
-      "X-Naver-Client-Secret": clientSecret,
-    },
-  });
+    return fetchJson<{ items?: NaverNewsItem[] }>(url, 4_000, {
+      headers: {
+        "X-Naver-Client-Id": clientId,
+        "X-Naver-Client-Secret": clientSecret,
+      },
+    });
+  }));
+  const items = bodies.flatMap((result) => result.status === "fulfilled" ? result.value.items ?? [] : []);
+  const todayItems = items.filter((item) => isTodayNewsDate(item.pubDate));
+  const usableItems = todayItems.length ? todayItems : items.filter((item) => isFreshNewsDate(item.pubDate, 2));
 
-  return (body.items ?? [])
+  return usableItems
     .map((item) => {
       const title = stripHtml(item.title ?? "");
       const summary = stripHtml(item.description ?? "");
@@ -1049,7 +1129,36 @@ async function fetchBreakingNews(): Promise<BreakingNewsItem[]> {
       };
     })
     .filter((item) => item.title && item.url)
+    .filter((item, index, list) => list.findIndex((candidate) => candidate.url === item.url || candidate.title === item.title) === index)
+    .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime())
     .slice(0, 12);
+}
+
+function mergeBreakingNews(...groups: BreakingNewsItem[][]) {
+  return groups
+    .flat()
+    .filter((item) => item.title && item.url)
+    .filter((item, index, list) => list.findIndex((candidate) => candidate.url === item.url || candidate.title === item.title) === index)
+    .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime())
+    .slice(0, 12);
+}
+
+function disclosuresToBreakingNews(disclosures: DartDisclosure[]): BreakingNewsItem[] {
+  const today = getKstYmd(0);
+  return disclosures
+    .filter((item) => item.rcept_dt === today)
+    .slice(0, 8)
+    .map((item) => {
+      const report = item.report_nm ?? "공시";
+      const company = item.corp_name ?? "상장사";
+      return {
+        title: `${company} ${report}`,
+        summary: "DART 오늘 공시입니다. 투자 판단 전 공시 원문과 정정 여부를 확인하세요.",
+        source: "DART 공시",
+        url: item.rcept_no ? `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${item.rcept_no}` : "https://dart.fss.or.kr/",
+        publishedAt: kstYmdToIso(item.rcept_dt ?? today),
+      };
+    });
 }
 
 function applyDisclosures(snapshot: MarketSnapshot, disclosures: DartDisclosure[]): MarketSnapshot {
@@ -1243,6 +1352,40 @@ function getKstYmd(offsetDays: number) {
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
   return `${year}${month}${day}`;
+}
+
+function kstYmdToIso(value: string) {
+  if (value.length !== 8) return new Date().toISOString();
+  const year = value.slice(0, 4);
+  const month = value.slice(4, 6);
+  const day = value.slice(6, 8);
+  return new Date(`${year}-${month}-${day}T09:00:00+09:00`).toISOString();
+}
+
+function isFreshNewsDate(value: string | undefined, maxAgeDays: number) {
+  if (!value) return false;
+  const published = new Date(value);
+  if (Number.isNaN(published.getTime())) return false;
+  const nowKst = Date.now() + 9 * 60 * 60 * 1000;
+  const publishedKst = published.getTime() + 9 * 60 * 60 * 1000;
+  const ageDays = (nowKst - publishedKst) / (24 * 60 * 60 * 1000);
+
+  return ageDays >= 0 && ageDays <= maxAgeDays;
+}
+
+function isTodayNewsDate(value: string | undefined) {
+  if (!value) return false;
+  const published = new Date(value);
+  if (Number.isNaN(published.getTime())) return false;
+
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  return formatter.format(published) === formatter.format(new Date());
 }
 
 function formatDisclosureDate(value: string) {
